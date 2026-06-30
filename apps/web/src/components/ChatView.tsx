@@ -1110,6 +1110,12 @@ function ChatViewContent(props: ChatViewProps) {
   const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
     Record<string, string | null>
   >({});
+  // The server's session `lastError` (e.g. "Aborted") can't be cleared client-side, so a plain
+  // dismiss would instantly fall back to it. Remember which lastError value the user dismissed
+  // and suppress exactly that one; a new (different) error still surfaces.
+  const [dismissedServerErrorByThreadKey, setDismissedServerErrorByThreadKey] = useState<
+    Record<string, string>
+  >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
@@ -1267,9 +1273,13 @@ function ChatViewContent(props: ChatViewProps) {
         : undefined,
     [subagentParentRef, subagentParentShell?.title, navigate],
   );
-  const threadError = isServerThread
-    ? (localServerError ?? serverThread?.session?.lastError ?? null)
-    : localDraftError;
+  const rawServerLastError = serverThread?.session?.lastError ?? null;
+  const serverLastError =
+    rawServerLastError !== null &&
+    dismissedServerErrorByThreadKey[routeThreadKey] === rawServerLastError
+      ? null
+      : rawServerLastError;
+  const threadError = isServerThread ? (localServerError ?? serverLastError) : localDraftError;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
@@ -5114,7 +5124,17 @@ function ChatViewContent(props: ChatViewProps) {
         <ProviderStatusBanner status={activeProviderStatus} />
         <ThreadErrorBanner
           error={threadError}
-          onDismiss={() => setThreadError(activeThread.id, null)}
+          onDismiss={() => {
+            // If the banner is showing the server's session lastError, remember it as dismissed
+            // (a plain clear would fall straight back to it); otherwise clear the local error.
+            if (threadError !== null && rawServerLastError === threadError) {
+              setDismissedServerErrorByThreadKey((existing) => ({
+                ...existing,
+                [routeThreadKey]: threadError,
+              }));
+            }
+            setThreadError(activeThread.id, null);
+          }}
         />
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">

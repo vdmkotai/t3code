@@ -16,14 +16,18 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
     <div className="pt-3 mx-auto max-w-3xl">
       <Alert variant="error">
         <CircleAlertIcon />
-        <Tooltip>
-          <TooltipTrigger render={<AlertDescription className="line-clamp-3" />}>
-            {error}
-          </TooltipTrigger>
-          <TooltipPopup side="top" className="max-w-96 whitespace-pre-wrap">
-            {error}
-          </TooltipPopup>
-        </Tooltip>
+        {/* AlertDescription must be a DIRECT child of Alert — Alert routes children to
+            icon/content/action slots by element type, and a Tooltip wrapper would otherwise
+            land the text in the narrow icon column (truncating it). Keep the truncation
+            tooltip INSIDE the description instead. */}
+        <AlertDescription className="line-clamp-3">
+          <Tooltip>
+            <TooltipTrigger render={<span className="cursor-default" />}>{error}</TooltipTrigger>
+            <TooltipPopup side="top" className="max-w-96 whitespace-pre-wrap">
+              {error}
+            </TooltipPopup>
+          </Tooltip>
+        </AlertDescription>
         {onDismiss && (
           <AlertAction>
             <Button variant="ghost" size="icon-xs" aria-label="Dismiss error" onClick={onDismiss}>
