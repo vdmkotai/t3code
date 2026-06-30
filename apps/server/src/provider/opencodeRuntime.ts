@@ -100,11 +100,19 @@ export interface OpenCodeCommandResult {
 export interface OpenCodeInventory {
   readonly providerList: ProviderListResponse;
   readonly agents: ReadonlyArray<Agent>;
+  readonly skills: ReadonlyArray<OpenCodeSkill>;
 }
 
 export interface ParsedOpenCodeModelSlug {
   readonly providerID: string;
   readonly modelID: string;
+}
+
+export interface OpenCodeSkill {
+  readonly name?: string | null;
+  readonly description?: string | null;
+  readonly location?: string | null;
+  readonly content?: string | null;
 }
 
 export interface OpenCodeRuntimeShape {
@@ -537,10 +545,20 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       Effect.map((result) => result.data ?? []),
     );
 
-  const loadOpenCodeInventory: OpenCodeRuntimeShape["loadOpenCodeInventory"] = (client) =>
-    Effect.all([loadProviders(client), loadAgents(client)], { concurrency: "unbounded" }).pipe(
-      Effect.map(([providerList, agents]) => ({ providerList, agents })),
+  const loadSkills = (client: OpencodeClient) =>
+    runOpenCodeSdk("app.skills", () => client.app.skills()).pipe(
+      Effect.map((result) => (result.data ?? []) as ReadonlyArray<OpenCodeSkill>),
+      // Skills are best-effort: an older OpenCode binary may not expose GET /skill
+      // (404). Degrade to an empty list so a skills failure never takes down the whole
+      // provider probe — providers and agents must still load. (Without this, the shared
+      // Effect.all below would fail the entire inventory and flip the provider to "error".)
+      Effect.orElseSucceed((): ReadonlyArray<OpenCodeSkill> => []),
     );
+
+  const loadOpenCodeInventory: OpenCodeRuntimeShape["loadOpenCodeInventory"] = (client) =>
+    Effect.all([loadProviders(client), loadAgents(client), loadSkills(client)], {
+      concurrency: "unbounded",
+    }).pipe(Effect.map(([providerList, agents, skills]) => ({ providerList, agents, skills })));
 
   return {
     startOpenCodeServerProcess,
