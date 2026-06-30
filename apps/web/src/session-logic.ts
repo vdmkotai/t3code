@@ -280,6 +280,39 @@ export function workEntryIsSubagentPill(entry: WorkLogEntry): boolean {
   return entry.itemType === "collab_agent_tool_call" && entry.subagent?.agentName !== undefined;
 }
 
+export type SubagentPillState = "running" | "completed" | "failed" | "stopped" | "dispatched";
+
+/**
+ * Resolve the visual state of a sub-agent pill. Phase 1 has no live child-session tracking, so:
+ * - failed/declined -> failed (X);
+ * - stopped -> stopped (—);
+ * - completed: a foreground sub-agent -> completed (check); a background one -> dispatched — the
+ *   parent `task` tool returns immediately while the child keeps running, so a check would read
+ *   as finished; show a neutral "running in background" until Phase 2 navigation lands;
+ * - in-progress: spinner while the turn runs; once the turn settles with no terminal event
+ *   (interrupt / lost event) resolve to stopped rather than spinning forever.
+ */
+export function resolveSubagentPillState(
+  entry: WorkLogEntry,
+  turnSettled: boolean,
+): SubagentPillState {
+  const status = entry.toolLifecycleStatus;
+  if (workEntryIndicatesToolFailure(entry) || status === "failed" || status === "declined") {
+    return "failed";
+  }
+  if (status === "stopped") {
+    return "stopped";
+  }
+  const isBackground = entry.subagent?.background === true;
+  if (status === "completed") {
+    return isBackground ? "dispatched" : "completed";
+  }
+  if (status === "inProgress") {
+    return turnSettled ? "stopped" : "running";
+  }
+  return turnSettled ? "completed" : "running";
+}
+
 export function formatDuration(durationMs: number): string {
   if (!Number.isFinite(durationMs) || durationMs < 0) return "0ms";
   if (durationMs < 1_000) return `${Math.max(1, Math.round(durationMs))}ms`;
@@ -655,7 +688,7 @@ export function deriveWorkLogEntries(
     if (isPlanBoundaryToolActivity(activity)) continue;
     entries.push(toDerivedWorkLogEntry(activity));
   }
-  return collapseDerivedWorkLogEntries(entries).map((entry) => {
+  return dedupeSubagentPills(collapseDerivedWorkLogEntries(entries)).map((entry) => {
     const { activityKind, collapseKey: _collapseKey, ...rest } = entry;
     return Object.assign(rest, { sourceActivityKind: activityKind });
   });
@@ -800,6 +833,53 @@ function collapseDerivedWorkLogEntries(
   return collapsed;
 }
 
+/**
+ * Stable identity for a sub-agent pill across its whole lifecycle, used to keep exactly one
+ * row per spawned sub-agent. Prefers the tool call id (present on every lifecycle event from
+ * the first, unlike the late-arriving child session id), falling back to the child session id;
+ * returns undefined when neither is known so distinct spawns are never wrongly merged.
+ */
+function subagentPillKey(entry: DerivedWorkLogEntry): string | undefined {
+  if (!workEntryIsSubagentPill(entry)) {
+    return undefined;
+  }
+  if (entry.toolCallId) {
+    return `callid:${entry.toolCallId}`;
+  }
+  if (entry.subagent?.childProviderSessionId) {
+    return `child:${entry.subagent.childProviderSessionId}`;
+  }
+  return undefined;
+}
+
+/**
+ * Concurrent sub-agents interleave their running/completed events, so the adjacency-based tool
+ * collapse cannot merge a single sub-agent's events. Reduce sub-agent pills by stable identity:
+ * one row per sub-agent, anchored at its first appearance, carrying its latest state.
+ */
+function dedupeSubagentPills(entries: ReadonlyArray<DerivedWorkLogEntry>): DerivedWorkLogEntry[] {
+  const indexByKey = new Map<string, number>();
+  const result: DerivedWorkLogEntry[] = [];
+  for (const entry of entries) {
+    const key = subagentPillKey(entry);
+    if (key === undefined) {
+      result.push(entry);
+      continue;
+    }
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, result.length);
+      result.push(entry);
+      continue;
+    }
+    const existing = result[existingIndex]!;
+    const merged = mergeDerivedWorkLogEntries(existing, entry);
+    // Anchor to the first appearance so the pill updates in place rather than jumping.
+    result[existingIndex] = { ...merged, id: existing.id, createdAt: existing.createdAt };
+  }
+  return result;
+}
+
 function shouldCollapseToolLifecycleEntries(
   previous: DerivedWorkLogEntry,
   next: DerivedWorkLogEntry,
@@ -876,12 +956,6 @@ function mergeChangedFiles(
 function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
   if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
     return undefined;
-  }
-  // Keep distinct sub-agent spawns on distinct rows: concurrent sub-agents share the
-  // `task` tool (and may share a description), so key by the child session id when
-  // present so two running sub-agents don't collapse into one pill.
-  if (entry.subagent?.childProviderSessionId) {
-    return `subagent:${entry.subagent.childProviderSessionId}`;
   }
   if (entry.toolCallId) {
     return `tool:${entry.toolCallId}`;
@@ -1116,7 +1190,7 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
-  return asTrimmedString(data?.toolCallId);
+  return asTrimmedString(payload?.toolCallId) ?? asTrimmedString(data?.toolCallId);
 }
 
 function extractSubagentInfo(payload: Record<string, unknown> | null): SubagentInfo | undefined {

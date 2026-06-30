@@ -26,6 +26,7 @@ import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { FileDiff } from "@pierre/diffs/react";
 import {
   deriveTimelineEntries,
+  resolveSubagentPillState,
   workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
@@ -1933,13 +1934,8 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           ? "(background)"
           : null;
     const turnSettled = !activity.activeTurnInProgress;
-    const status = workEntry.toolLifecycleStatus;
-    const failed =
-      workEntryIndicatesToolFailure(workEntry) || status === "failed" || status === "declined";
-    const stopped = status === "stopped";
-    const completed =
-      !failed && !stopped && (status === "completed" || (turnSettled && status !== "inProgress"));
-    const running = !failed && !stopped && !completed;
+    const pillState = resolveSubagentPillState(workEntry, turnSettled);
+    const failed = pillState === "failed";
     const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
     const canExpand = expandedBody !== null;
     const ariaLabel = subtitle ? `${agentLabel} — ${subtitle}` : agentLabel;
@@ -2005,7 +2001,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                 ) : null}
               </span>
               <span className="flex size-4 shrink-0 items-center justify-center">
-                {running ? (
+                {pillState === "running" ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={<span className="flex size-4 items-center justify-center" />}
@@ -2014,7 +2010,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                     </TooltipTrigger>
                     <TooltipPopup>Working…</TooltipPopup>
                   </Tooltip>
-                ) : failed ? (
+                ) : pillState === "failed" ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={
@@ -2028,7 +2024,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                     </TooltipTrigger>
                     <TooltipPopup>Failed</TooltipPopup>
                   </Tooltip>
-                ) : stopped ? (
+                ) : pillState === "stopped" ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={<span className="flex size-4 items-center justify-center" />}
@@ -2036,6 +2032,15 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                       <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
                     </TooltipTrigger>
                     <TooltipPopup>Stopped</TooltipPopup>
+                  </Tooltip>
+                ) : pillState === "dispatched" ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="flex size-4 items-center justify-center" />}
+                    >
+                      <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
+                    </TooltipTrigger>
+                    <TooltipPopup>Running in background</TooltipPopup>
                   </Tooltip>
                 ) : (
                   <Tooltip>
