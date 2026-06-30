@@ -1201,11 +1201,14 @@ function extractSubagentInfo(payload: Record<string, unknown> | null): SubagentI
   const agentName = asTrimmedString(subagent.agentName) ?? undefined;
   const description = asTrimmedString(subagent.description) ?? undefined;
   const childProviderSessionId = asTrimmedString(subagent.childProviderSessionId) ?? undefined;
+  const childThreadIdRaw = asTrimmedString(subagent.childThreadId);
+  const childThreadId = childThreadIdRaw !== null ? (childThreadIdRaw as ThreadId) : undefined;
   const background = subagent.background === true ? true : undefined;
   if (
     agentName === undefined &&
     description === undefined &&
     childProviderSessionId === undefined &&
+    childThreadId === undefined &&
     background === undefined
   ) {
     return undefined;
@@ -1214,6 +1217,7 @@ function extractSubagentInfo(payload: Record<string, unknown> | null): SubagentI
     ...(agentName !== undefined ? { agentName } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(childProviderSessionId !== undefined ? { childProviderSessionId } : {}),
+    ...(childThreadId !== undefined ? { childThreadId } : {}),
     ...(background !== undefined ? { background } : {}),
   };
 }

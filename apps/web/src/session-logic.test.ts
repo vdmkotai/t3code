@@ -1717,7 +1717,11 @@ describe("subagent pill derivation", () => {
           ...(overrides.agentName !== undefined ? { agentName: overrides.agentName } : {}),
           ...(overrides.description !== undefined ? { description: overrides.description } : {}),
           ...(overrides.childSession !== undefined
-            ? { childProviderSessionId: overrides.childSession }
+            ? // The server reuses the child session id as the navigable child ThreadId.
+              {
+                childProviderSessionId: overrides.childSession,
+                childThreadId: overrides.childSession,
+              }
             : {}),
           ...(overrides.background !== undefined ? { background: overrides.background } : {}),
         },
@@ -1743,8 +1747,12 @@ describe("subagent pill derivation", () => {
       agentName: "givi",
       description: "JS poem one",
       childProviderSessionId: "ses_child_1",
+      // The navigable child ThreadId must survive extraction — without it the pill is
+      // not click-through (regression guard for the Phase 2 client wiring).
+      childThreadId: "ses_child_1",
       background: true,
     });
+    expect(entry.subagent?.childThreadId).toBe("ses_child_1");
     expect(workEntryIsSubagentPill(entry)).toBe(true);
   });
 
