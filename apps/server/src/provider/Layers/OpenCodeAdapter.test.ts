@@ -1116,6 +1116,95 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       }),
   );
 
+  it.effect("routes a sub-agent child session's events onto the child thread, not the parent", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-child-routing");
+      const sessionID = "http://127.0.0.1:9999/session";
+      const childSessionId = "ses_child_route";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.updated",
+          properties: { sessionID, info: { id: "msg-task", role: "assistant" } },
+        },
+        // Parent's task tool reveals the child session → registers the shadow context.
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID,
+            time: 1,
+            part: {
+              id: "part-task",
+              sessionID,
+              messageID: "msg-task",
+              type: "tool",
+              tool: "task",
+              callID: "call-task",
+              state: {
+                status: "running",
+                title: "child (@givi subagent)",
+                input: { subagent_type: "givi", description: "child" },
+                metadata: { sessionId: childSessionId, parentSessionId: sessionID },
+                time: { start: 1 },
+              },
+            },
+          },
+        },
+        // The child session's own assistant text — must land on the CHILD thread.
+        {
+          type: "message.updated",
+          properties: { sessionID: childSessionId, info: { id: "msg-child", role: "assistant" } },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: childSessionId,
+            time: 2,
+            part: {
+              id: "part-child",
+              sessionID: childSessionId,
+              messageID: "msg-child",
+              type: "text",
+              text: "child says hi",
+              time: { start: 2 },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.started" || event.type === "content.delta"),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const childThreadId = asThreadId(childSessionId);
+      // The child's synthetic turn + its assistant text are both emitted under the child thread.
+      const turnStarted = events.find((event) => event.type === "turn.started");
+      NodeAssert.ok(turnStarted, "expected a turn.started for the child session");
+      NodeAssert.equal(turnStarted?.threadId, childThreadId);
+      const childDelta = events.find((event) => event.type === "content.delta");
+      NodeAssert.ok(childDelta, "expected the child's text to be emitted");
+      NodeAssert.equal(childDelta?.threadId, childThreadId);
+      if (childDelta?.type === "content.delta") {
+        NodeAssert.equal(childDelta.payload.delta, "child says hi");
+      }
+      // Critical: the child's text never leaks onto the parent thread.
+      const leaked = events.find(
+        (event) => event.type === "content.delta" && event.threadId === threadId,
+      );
+      NodeAssert.equal(leaked, undefined, "child content must not leak onto the parent thread");
+    }),
+  );
+
   it.effect("writes provider-native observability records using the session thread id", () =>
     Effect.gen(function* () {
       const nativeEvents: Array<{
