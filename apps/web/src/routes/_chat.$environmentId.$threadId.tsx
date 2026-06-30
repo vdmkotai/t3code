@@ -46,7 +46,15 @@ function ChatThreadRouteView() {
     }
 
     if (!routeThreadExists && environmentHasAnyThreads) {
-      void navigate({ to: "/", replace: true });
+      // Don't bounce immediately: a sub-agent child session opened from the parent is
+      // intentionally absent from the shell snapshot, so there is a brief window before its
+      // `subscribeThread` detail resolves. Give it a moment — if the detail arrives, this
+      // effect re-runs with `routeThreadExists` true and the timer is cleared; only a thread
+      // that stays unresolved gets redirected.
+      const timer = setTimeout(() => {
+        void navigate({ to: "/", replace: true });
+      }, 400);
+      return () => clearTimeout(timer);
     }
   }, [bootstrapComplete, environmentHasAnyThreads, navigate, routeThreadExists, threadRef]);
 

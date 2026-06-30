@@ -23,6 +23,8 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   draftId?: DraftId;
   activeThreadTitle: string;
+  /** Phase 2: when this thread is a sub-agent child, a clickable crumb back to its parent. */
+  parentCrumb?: { title: string; onClick: () => void };
   activeProjectName: string | undefined;
   openInCwd: string | null;
   activeProjectScripts: ReadonlyArray<ProjectScript> | undefined;
@@ -57,6 +59,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   draftId,
   activeThreadTitle,
+  parentCrumb,
   activeProjectName,
   openInCwd,
   activeProjectScripts,
@@ -79,6 +82,21 @@ export const ChatHeader = memo(function ChatHeader({
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
+        {parentCrumb && (
+          <>
+            <button
+              type="button"
+              onClick={parentCrumb.onClick}
+              className="min-w-0 max-w-[45%] shrink truncate text-sm text-muted-foreground transition-colors hover:text-foreground hover:underline"
+              title={`Back to ${parentCrumb.title}`}
+            >
+              {parentCrumb.title}
+            </button>
+            <span className="shrink-0 text-muted-foreground/45" aria-hidden>
+              /
+            </span>
+          </>
+        )}
         <Tooltip>
           <TooltipTrigger
             render={

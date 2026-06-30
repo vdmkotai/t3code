@@ -5,7 +5,9 @@ import {
   type ServerProviderSkill,
   type TurnId,
 } from "@t3tools/contracts";
-import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { useNavigate } from "@tanstack/react-router";
+import { buildThreadRouteParams } from "../../threadRoutes";
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import {
   createContext,
@@ -1919,6 +1921,8 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 }) {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
+  const rowCtx = use(TimelineRowCtx);
+  const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
 
   if (workEntryIsSubagentPill(workEntry)) {
@@ -1936,19 +1940,35 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     const turnSettled = !activity.activeTurnInProgress;
     const pillState = resolveSubagentPillState(workEntry, turnSettled);
     const failed = pillState === "failed";
-    const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
+    // Phase 2: when the sub-agent has a navigable child session, clicking the pill opens
+    // that session's read-only view instead of expanding its output inline.
+    const childThreadId = subagent?.childThreadId;
+    const openChildSession =
+      childThreadId !== undefined
+        ? () =>
+            void navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(
+                scopeThreadRef(rowCtx.activeThreadEnvironmentId, childThreadId),
+              ),
+            })
+        : undefined;
+    const expandedBody = openChildSession
+      ? null
+      : buildToolCallExpandedBody(workEntry, workspaceRoot);
     const canExpand = expandedBody !== null;
+    const onActivate = openChildSession ?? (canExpand ? () => setExpanded((v) => !v) : undefined);
     const ariaLabel = subtitle ? `${agentLabel} — ${subtitle}` : agentLabel;
-    const pillToggleProps = canExpand
+    const pillToggleProps = onActivate
       ? {
           role: "button" as const,
           tabIndex: 0 as const,
-          "aria-label": ariaLabel,
-          onClick: () => setExpanded((v) => !v),
+          "aria-label": openChildSession ? `Open subagent session: ${ariaLabel}` : ariaLabel,
+          onClick: onActivate,
           onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              setExpanded((v) => !v);
+              onActivate();
             }
           },
         }
@@ -1957,7 +1977,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       <div
         className={cn(
           "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
-          canExpand &&
+          onActivate &&
             "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
         )}
         {...pillToggleProps}
@@ -1988,9 +2008,18 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             <div className="flex shrink-0 items-center gap-px text-muted-foreground/55">
               <span
                 className="flex size-4 shrink-0 items-center justify-center"
-                aria-hidden={!canExpand}
+                aria-hidden={!onActivate}
               >
-                {canExpand ? (
+                {openChildSession ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="flex size-4 items-center justify-center" />}
+                    >
+                      <ChevronRightIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+                    </TooltipTrigger>
+                    <TooltipPopup>Open subagent session</TooltipPopup>
+                  </Tooltip>
+                ) : canExpand ? (
                   <ChevronDownIcon
                     className={cn(
                       "size-3 shrink-0 opacity-70 transition-transform duration-200",
