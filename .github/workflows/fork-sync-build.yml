@@ -1,0 +1,160 @@
+name: Fork sync + build
+
+# Keeps the personal fork current with upstream and ships an installable macOS
+# build. `fork-build` is the single integration branch that ACCUMULATES every
+# local change (upstream main + the #3604 OpenCode resume fix + the sub-agent
+# visibility feature + the parallel-install variant patches). Day to day:
+#   1. Merge the latest pingdotgg/t3code main INTO fork-build (forward-only — no
+#      force-push, so it is safe to keep committing new features onto fork-build).
+#   2. On a clean merge, push it and build an unsigned arm64 DMG.
+#   3. Publish that DMG to the rolling `fork-build-latest` prerelease.
+#   4. On a merge conflict or build failure, open an issue so a human (or an
+#      agent) can step in — the only time manual work is needed.
+#
+# Merge (not rebase) is deliberate: fork-build is a long-lived branch you append
+# your own commits to, so it must only ever move forward. Conflicts are resolved
+# once and recorded in the merge commit (enable `git rerere` locally to have git
+# replay those resolutions automatically on the next sync).
+
+on:
+  schedule:
+    # 06:00 UTC daily — after upstream's nightly has typically landed.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      skip_sync:
+        description: "Build the current fork-build as-is (no merge of upstream)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync-build
+  cancel-in-progress: false
+
+env:
+  INTEGRATION_BRANCH: fork-build
+  UPSTREAM_REPO: https://github.com/pingdotgg/t3code.git
+
+jobs:
+  sync-and-build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: fork-build
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge upstream/main into fork-build
+        id: sync
+        run: |
+          set -euo pipefail
+          git config user.name "fork-bot"
+          git config user.email "fork-bot@users.noreply.github.com"
+          # Record + replay conflict resolutions across runs.
+          git config rerere.enabled true
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream main
+          if [ "${{ github.event.inputs.skip_sync }}" = "true" ]; then
+            echo "Skipping upstream merge by request."
+          else
+            if ! git merge --no-edit upstream/main; then
+              git merge --abort || true
+              echo "MERGE_CONFLICT=1" >> "$GITHUB_ENV"
+              echo "::error::Merge of upstream/main into $INTEGRATION_BRANCH hit a conflict."
+              exit 1
+            fi
+            git push origin "$INTEGRATION_BRANCH"
+          fi
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.1"
+
+      - name: Enable pnpm (corepack)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Sanity-check the carried changes (typecheck + tests)
+        run: |
+          set -euo pipefail
+          # Typecheck the packages our patches touch.
+          pnpm --filter t3 run typecheck
+          pnpm --filter @t3tools/web run typecheck
+          # #3604 OpenCode resume fix + the sub-agent visibility feature.
+          pnpm --filter t3 exec vp test run \
+            src/provider/Layers/OpenCodeAdapter.test.ts \
+            src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
+          pnpm --filter @t3tools/web exec vp test run \
+            src/session-logic.test.ts \
+            src/components/chat/MessagesTimeline.logic.test.ts
+
+      - name: Build desktop inputs
+        run: pnpm run build:desktop
+
+      - name: Package DMG (arm64, unsigned)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          BUILD_VERSION="0.0.0-fork.$(date -u +%Y%m%d).${{ github.run_number }}"
+          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
+          pnpm run dist:desktop:artifact \
+            --platform mac --target dmg --arch arm64 \
+            --build-version "$BUILD_VERSION" --verbose
+
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Refresh the single rolling release so the newest DMG is always at a
+          # stable URL.
+          gh release delete fork-build-latest --cleanup-tag --yes || true
+          gh release create fork-build-latest release/*.dmg \
+            --target "$INTEGRATION_BRANCH" \
+            --title "Fork build — $BUILD_VERSION" \
+            --prerelease \
+            --notes "Auto-built personal fork of pingdotgg/t3code carrying all local changes: the **#3604 OpenCode session-resume fix** and the **sub-agent visibility** feature.
+
+          Installs **alongside** your primary T3 Code (separate bundle id \`com.t3tools.t3code.fork3604\`, app name \"T3 Code (Fork 3604)\", isolated data dir \`~/.t3-fork3604\`).
+
+          Unsigned build: on first launch right-click the app → Open, or run \`xattr -dr com.apple.quarantine \"/Applications/T3 Code (Fork 3604).app\"\`."
+
+      - name: Report failure as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "${MERGE_CONFLICT:-0}" = "1" ]; then
+            title="⚠️ Fork sync conflict merging upstream/main ($(date -u +%Y-%m-%d))"
+            body=$(cat <<EOF
+          The daily merge of \`upstream/main\` into \`$INTEGRATION_BRANCH\` hit a conflict and was aborted — the fork was **not** updated or rebuilt today.
+
+          Resolve locally (conflicts are usually in the files our patches touch — \`OpenCodeAdapter.ts\`, the timeline/session-logic UI):
+          \`\`\`
+          git fetch upstream
+          git switch $INTEGRATION_BRANCH
+          git merge upstream/main         # resolve conflicts, then:
+          git commit                      # finish the merge
+          git push origin $INTEGRATION_BRANCH
+          \`\`\`
+          Tip: \`git config --global rerere.enabled true\` once, and git will replay these resolutions next time. Then re-run the workflow. Logs: $run_url
+          EOF
+          )
+          else
+            title="⚠️ Fork build failed ($(date -u +%Y-%m-%d))"
+            body=$(printf 'The upstream merge succeeded but the desktop DMG build/test failed. Logs: %s' "$run_url")
+          fi
+          gh issue create --title "$title" --body "$body" || true
