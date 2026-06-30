@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type OpenCodeSettings,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -252,6 +253,62 @@ function flattenOpenCodeModels(input: OpenCodeInventory): ReadonlyArray<ServerPr
   return models.toSorted((left, right) => left.name.localeCompare(right.name));
 }
 
+function trimOptional(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Map an OpenCode skill's absolute `location` to a t3code install-source scope
+ * (consumed by `formatProviderSkillInstallSource` on the client). OpenCode's own
+ * scanner buckets skills as global (`~/.config/opencode`, `~/.claude`, `~/.agents`)
+ * vs project (the same dirs walked up from the worktree, plus project-local
+ * `.opencode`). The SDK doesn't expose that bucket, so infer it from the path:
+ *   - `/.config/opencode/`  → user   (global opencode config)
+ *   - `/.opencode/`         → project (project-local opencode config)
+ *   - under `cwd`           → project (`.claude`/`.agents`/custom inside the repo)
+ *   - otherwise             → user   (home-level skills are the common default)
+ */
+function inferOpenCodeSkillScope(location: string, cwd: string): string {
+  const normalized = location.replaceAll("\\", "/");
+  if (normalized.includes("/.config/opencode/")) {
+    return "user";
+  }
+  if (normalized.includes("/.opencode/")) {
+    return "project";
+  }
+  const normalizedCwd = cwd.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (normalizedCwd.length > 0 && normalized.startsWith(`${normalizedCwd}/`)) {
+    return "project";
+  }
+  return "user";
+}
+
+function flattenOpenCodeSkills(
+  input: OpenCodeInventory,
+  cwd: string,
+): ReadonlyArray<ServerProviderSkill> {
+  const skills: ServerProviderSkill[] = [];
+  for (const skill of input.skills ?? []) {
+    const name = trimOptional(skill.name);
+    const path = trimOptional(skill.location);
+    if (!name || !path) {
+      continue;
+    }
+
+    const description = trimOptional(skill.description);
+    skills.push({
+      name,
+      path,
+      enabled: true,
+      scope: inferOpenCodeSkillScope(path, cwd),
+      ...(description ? { description, shortDescription: description } : {}),
+    });
+  }
+
+  return skills.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
 export const makePendingOpenCodeProvider = (
   openCodeSettings: OpenCodeSettings,
 ): Effect.Effect<ServerProviderDraft> =>
@@ -442,12 +499,14 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     customModels,
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
+  const skills = flattenOpenCodeSkills(inventoryExit.value, cwd);
   const connectedCount = inventoryExit.value.providerList.connected.length;
   return buildServerProvider({
     presentation: OPENCODE_PRESENTATION,
     enabled: true,
     checkedAt,
     models,
+    skills,
     probe: {
       installed: true,
       version,
