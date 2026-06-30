@@ -182,6 +182,16 @@ interface OpenCodeSessionContext {
    *   - tears down the OpenCode server process for scope-owned servers.
    */
   readonly sessionScope: Scope.Closeable;
+  /**
+   * Phase 2 sub-agent visibility: child sub-agent sessions spawned by this session's
+   * `task` tool, keyed by the child OpenCode session id. Each is a lightweight "shadow"
+   * context that reuses the parent's client/server/scope but has its own threadId
+   * (= the child session id) and per-message state, so the normal event handler emits
+   * the child's messages/tool-calls under the child thread. Only the parent context
+   * (not a shadow) populates this; `isSubagentShadow` gates against nesting.
+   */
+  readonly childSessions: Map<string, OpenCodeSessionContext>;
+  readonly isSubagentShadow: boolean;
 }
 
 export interface OpenCodeAdapterLiveOptions {
@@ -471,10 +481,15 @@ function subagentInfoFromToolPart(part: Extract<Part, { type: "tool" }>): Subage
   ) {
     return undefined;
   }
+  // Reuse the OpenCode child session id as the navigable t3 ThreadId (1:1). The pill
+  // becomes click-through and ingestion materializes a child thread under this id.
+  const childThreadId =
+    childProviderSessionId !== undefined ? ThreadId.make(childProviderSessionId) : undefined;
   return {
     ...(agentName !== undefined ? { agentName } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(childProviderSessionId !== undefined ? { childProviderSessionId } : {}),
+    ...(childThreadId !== undefined ? { childThreadId } : {}),
     ...(background !== undefined ? { background } : {}),
   };
 }
@@ -769,6 +784,59 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    /**
+     * Phase 2: register a "shadow" context for a sub-agent's child session the first time the
+     * parent's `task` tool reveals it. The shadow reuses the parent's client/server/scope but
+     * has its own threadId (= child session id) and per-message state, so the normal event
+     * handler emits the child's messages/tool-calls under the child thread. A synthetic turn is
+     * started so the child shows as working; the child's own `session.status` idle completes it.
+     */
+    const registerSubagentChild = Effect.fn("registerSubagentChild")(function* (
+      parent: OpenCodeSessionContext,
+      subagent: SubagentInfo,
+    ) {
+      if (parent.isSubagentShadow) return; // depth cap: shadows don't spawn grandchildren
+      const childSessionId = subagent.childProviderSessionId;
+      const childThreadId = subagent.childThreadId;
+      if (childSessionId === undefined || childThreadId === undefined) return;
+      if (parent.childSessions.has(childSessionId)) return;
+
+      const childTurnId = TurnId.make(`turn:${childThreadId}`);
+      const childContext: OpenCodeSessionContext = {
+        session: {
+          ...parent.session,
+          threadId: childThreadId,
+          status: "running",
+          activeTurnId: childTurnId,
+        },
+        client: parent.client,
+        server: parent.server,
+        directory: parent.directory,
+        openCodeSessionId: childSessionId,
+        pendingPermissions: new Map(),
+        pendingQuestions: new Map(),
+        partById: new Map(),
+        emittedTextByPartId: new Map(),
+        messageRoleById: new Map(),
+        completedAssistantPartIds: new Set(),
+        turns: [],
+        activeTurnId: childTurnId,
+        activeAgent: undefined,
+        activeVariant: undefined,
+        stopped: parent.stopped,
+        sessionScope: parent.sessionScope,
+        childSessions: new Map(),
+        isSubagentShadow: true,
+      };
+      parent.childSessions.set(childSessionId, childContext);
+
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: childThreadId, turnId: childTurnId })),
+        type: "turn.started",
+        payload: parent.session.model ? { model: parent.session.model } : {},
+      });
+    });
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
@@ -905,6 +973,9 @@ export function makeOpenCodeAdapter(
             };
             appendTurnItem(context, turnId, part);
             yield* emit(runtimeEvent);
+            if (subagent?.childProviderSessionId !== undefined) {
+              yield* registerSubagentChild(context, subagent);
+            }
           }
           break;
         }
@@ -1091,6 +1162,30 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    /**
+     * Route each subscribed event to the session context that owns it. The subscription is
+     * global (all OpenCode sessions), so an event belongs to the parent, to one of its
+     * registered sub-agent children, or to neither (dropped). Routing by session id keeps a
+     * child's events strictly on the child thread — they never leak into the parent timeline.
+     */
+    const dispatchSubscribedEvent = (
+      parent: OpenCodeSessionContext,
+      event: OpenCodeSubscribedEvent,
+    ) => {
+      const payloadSessionId =
+        "properties" in event ? (event.properties as { sessionID?: unknown }).sessionID : undefined;
+      if (payloadSessionId === parent.openCodeSessionId) {
+        return handleSubscribedEvent(parent, event);
+      }
+      if (typeof payloadSessionId === "string") {
+        const child = parent.childSessions.get(payloadSessionId);
+        if (child) {
+          return handleSubscribedEvent(child, event);
+        }
+      }
+      return Effect.void;
+    };
+
     const startEventPump = Effect.fn("startEventPump")(function* (context: OpenCodeSessionContext) {
       // One AbortController per session scope. The finalizer fires when
       // the scope closes (explicit stop, unexpected exit, or layer
@@ -1119,7 +1214,7 @@ export function makeOpenCodeAdapter(
                 detail: openCodeRuntimeErrorDetail(cause),
                 cause,
               }),
-          ).pipe(Stream.runForEach((event) => handleSubscribedEvent(context, event))),
+          ).pipe(Stream.runForEach((event) => dispatchSubscribedEvent(context, event))),
       ).pipe(
         Effect.exit,
         Effect.flatMap((exit) =>
@@ -1355,6 +1450,8 @@ export function makeOpenCodeAdapter(
           activeVariant: undefined,
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
+          childSessions: new Map(),
+          isSubagentShadow: false,
         };
         sessions.set(input.threadId, context);
         yield* startEventPump(context);

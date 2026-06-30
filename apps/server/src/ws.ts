@@ -648,11 +648,15 @@ const makeWsRpcLayer = (
           case "thread.unarchived":
             return projectionSnapshotQuery.getThreadShellById(event.payload.threadId).pipe(
               Effect.map((thread) =>
-                Option.map(thread, (nextThread) => ({
-                  kind: "thread-upserted" as const,
-                  sequence: event.sequence,
-                  thread: nextThread,
-                })),
+                Option.flatMap(thread, (nextThread) =>
+                  nextThread.parentThreadId !== null
+                    ? Option.none()
+                    : Option.some({
+                        kind: "thread-upserted" as const,
+                        sequence: event.sequence,
+                        thread: nextThread,
+                      }),
+                ),
               ),
               Effect.orElseSucceed(() => Option.none()),
             );
@@ -664,11 +668,17 @@ const makeWsRpcLayer = (
               .getThreadShellById(ThreadId.make(event.aggregateId))
               .pipe(
                 Effect.map((thread) =>
-                  Option.map(thread, (nextThread) => ({
-                    kind: "thread-upserted" as const,
-                    sequence: event.sequence,
-                    thread: nextThread,
-                  })),
+                  Option.flatMap(thread, (nextThread) =>
+                    // Sub-agent child threads are intentionally absent from the sidebar/shell;
+                    // never emit a thread-upserted that would re-introduce them on a later event.
+                    nextThread.parentThreadId !== null
+                      ? Option.none()
+                      : Option.some({
+                          kind: "thread-upserted" as const,
+                          sequence: event.sequence,
+                          thread: nextThread,
+                        }),
+                  ),
                 ),
                 Effect.orElseSucceed(() => Option.none()),
               );

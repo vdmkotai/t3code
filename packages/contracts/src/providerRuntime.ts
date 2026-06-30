@@ -413,6 +413,10 @@ export const SubagentInfo = Schema.Struct({
   agentName: Schema.optional(TrimmedNonEmptyStringSchema),
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   childProviderSessionId: Schema.optional(TrimmedNonEmptyStringSchema),
+  // The navigable t3 ThreadId of the spawned child session (Phase 2). Present only
+  // when the provider exposes a real, openable child session (OpenCode); absent for
+  // Claude. The pill is click-through only when this is set.
+  childThreadId: Schema.optional(ThreadId),
   background: Schema.optional(Schema.Boolean),
 });
 export type SubagentInfo = typeof SubagentInfo.Type;

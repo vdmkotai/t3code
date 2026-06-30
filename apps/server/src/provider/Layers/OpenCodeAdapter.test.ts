@@ -1105,6 +1105,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
             agentName: "givi",
             description: "JS poem one",
             childProviderSessionId: "ses_child_1",
+            childThreadId: "ses_child_1",
             background: true,
           });
         }

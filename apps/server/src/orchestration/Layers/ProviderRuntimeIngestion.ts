@@ -15,7 +15,9 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadShell,
   type ProviderRuntimeEvent,
+  type SubagentInfo,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -1218,10 +1220,70 @@ const make = Effect.gen(function* () {
     },
   );
 
+  /**
+   * Phase 2 sub-agent visibility: when a sub-agent tool item reveals the child session it
+   * spawned (`subagent.childThreadId`), materialize a hidden child thread that mirrors that
+   * provider session, so it can be opened and streamed read-only. The child inherits the
+   * parent's project/model/branch/worktree and carries `parentThreadId` (which keeps it out
+   * of the sidebar). Idempotent: skipped once the child thread exists. Errors are swallowed —
+   * a failure here must never break the parent's turn processing.
+   */
+  const ensureSubagentChildThread = Effect.fn("ensureSubagentChildThread")(function* (
+    parentThread: OrchestrationThreadShell,
+    event: ProviderRuntimeEvent,
+    subagent: SubagentInfo,
+  ) {
+    const childThreadId = subagent.childThreadId;
+    if (childThreadId === undefined || childThreadId === parentThread.id) {
+      return;
+    }
+    const title = subagent.description ?? subagent.agentName;
+    if (title === undefined) {
+      return;
+    }
+    const existing = yield* projectionSnapshotQuery
+      .getThreadShellById(childThreadId)
+      .pipe(Effect.map(Option.getOrUndefined));
+    if (existing) {
+      return;
+    }
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.create",
+        commandId: yield* providerCommandId(event, `subagent-thread-create:${childThreadId}`),
+        threadId: childThreadId,
+        projectId: parentThread.projectId,
+        title,
+        modelSelection: parentThread.modelSelection,
+        runtimeMode: parentThread.runtimeMode,
+        interactionMode: parentThread.interactionMode,
+        branch: parentThread.branch,
+        worktreePath: parentThread.worktreePath,
+        parentThreadId: parentThread.id,
+        createdAt: event.createdAt,
+      })
+      .pipe(Effect.ignore);
+  });
+
+  const subagentFromItemEvent = (event: ProviderRuntimeEvent): SubagentInfo | undefined =>
+    event.type === "item.started" ||
+    event.type === "item.updated" ||
+    event.type === "item.completed"
+      ? event.payload.subagent
+      : undefined;
+
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
+
+      // Materialize the hidden child thread the first time a sub-agent item reveals it, so
+      // the child's own (separately-routed) events have a thread to land on. Ingestion is
+      // sequential, so this parent-side create runs before the child's first event.
+      const spawnedSubagent = subagentFromItemEvent(event);
+      if (spawnedSubagent !== undefined) {
+        yield* ensureSubagentChildThread(thread, event, spawnedSubagent);
+      }
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
