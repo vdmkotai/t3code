@@ -30,7 +30,10 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+// FORK BUILD (local, not for upstream): distinct bundle id so macOS treats this
+// as a separate app from the user's primary T3 Code install (separate Launch
+// Services identity, separate /Applications slot).
+const DESKTOP_APP_ID = "com.t3tools.t3code.fork3604";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -1330,10 +1333,10 @@ export function resolveMockUpdateServerUrl(mockUpdateServerPort: number | undefi
   return `http://localhost:${mockUpdateServerPort ?? 3000}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
-  return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+export function resolveDesktopProductName(_version: string): string {
+  // FORK BUILD: fixed, clearly-distinct product name so the app installs next to
+  // "T3 Code (Nightly)" as its own bundle rather than overwriting it.
+  return "T3 Code (Fork 3604)";
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1384,6 +1387,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       },
     ];
   }
+  // FORK BUILD: never wire an auto-updater. A fork build must not silently
+  // replace itself with an upstream artifact; new builds are installed by hand.
+  // Forcing null also stops electron-builder inferring a provider.
+  buildConfig.publish = null;
 
   if (platform === "mac") {
     buildConfig.mac = {
@@ -1392,8 +1399,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: "T3 Code (Fork 3604)",
+          // FORK BUILD: distinct scheme so deep links don't get routed to the
+          // primary install by Launch Services.
+          schemes: ["t3code-fork3604"],
         },
       ],
       ...(macPasskeySigning

@@ -147,7 +147,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const baseDir = Option.getOrElse(config.t3Home, () => path.join(homeDirectory, ".t3"));
+  // FORK BUILD (local, not for upstream): isolate all on-disk state under a
+  // dedicated base dir so this build can be installed and run alongside the
+  // user's primary T3 Code Nightly without sharing ~/.t3/userdata/state.sqlite
+  // (which would risk cross-version DB migrations corrupting the main install).
+  const baseDir = Option.getOrElse(config.t3Home, () => path.join(homeDirectory, ".t3-fork3604"));
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const branding = resolveDesktopAppBranding({
@@ -156,7 +160,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
   });
   const displayName = branding.displayName;
   const stateDir = path.join(baseDir, isDevelopment ? "dev" : "userdata");
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
+  // FORK BUILD: distinct Electron userData dir so the single-instance lock and
+  // Chromium profile do not collide with the primary install — both can run at once.
+  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code-fork3604";
   const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
   const resourcesPath = input.resourcesPath;
 
