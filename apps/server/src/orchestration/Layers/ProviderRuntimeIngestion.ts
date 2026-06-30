@@ -1282,7 +1282,11 @@ const make = Effect.gen(function* () {
       // sequential, so this parent-side create runs before the child's first event.
       const spawnedSubagent = subagentFromItemEvent(event);
       if (spawnedSubagent !== undefined) {
-        yield* ensureSubagentChildThread(thread, event, spawnedSubagent);
+        // Materializing the child thread must NEVER break the parent's turn processing —
+        // swallow (and log) any failure from the existence check or the create dispatch.
+        yield* ensureSubagentChildThread(thread, event, spawnedSubagent).pipe(
+          Effect.ignore({ log: true }),
+        );
       }
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;

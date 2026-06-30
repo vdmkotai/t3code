@@ -369,7 +369,13 @@ export const make = Effect.gen(function* () {
         });
       });
 
-    const thread = yield* snapshotQuery.getThreadShellById(threadId);
+    // Sub-agent child threads are hidden everywhere (sidebar, search, AND agent awareness):
+    // treat a child the same as a missing thread so it never publishes peer-presence or push
+    // state, mirroring the `parent_thread_id IS NULL` exclusion on the shell-list queries.
+    const thread = Option.filter(
+      yield* snapshotQuery.getThreadShellById(threadId),
+      (shell) => (shell.parentThreadId ?? null) === null,
+    );
     const project = Option.isSome(thread)
       ? yield* snapshotQuery.getProjectShellById(thread.value.projectId)
       : Option.none<OrchestrationProjectShell>();

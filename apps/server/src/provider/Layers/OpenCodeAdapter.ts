@@ -347,6 +347,34 @@ function ensureSessionContext(
   return session;
 }
 
+/**
+ * Like {@link ensureSessionContext} but also resolves a sub-agent CHILD shadow context by its
+ * threadId. Used by the approval/question reply paths: a child session's permission/question
+ * request is surfaced under the (read-only) child thread, and the user can answer it there — so
+ * the reply must reach the child's shadow context (it shares the parent's client). NOT used for
+ * sendTurn, which intentionally rejects child threads (children are read-only).
+ */
+function ensureRespondableContext(
+  sessions: ReadonlyMap<ThreadId, OpenCodeSessionContext>,
+  threadId: ThreadId,
+): OpenCodeSessionContext {
+  const direct = sessions.get(threadId);
+  if (direct) {
+    return ensureSessionContext(sessions, threadId);
+  }
+  for (const parent of sessions.values()) {
+    for (const child of parent.childSessions.values()) {
+      if (child.session.threadId === threadId) {
+        if (Ref.getUnsafe(child.stopped)) {
+          throw new ProviderAdapterSessionClosedError({ provider: PROVIDER, threadId });
+        }
+        return child;
+      }
+    }
+  }
+  throw new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
+}
+
 function normalizeQuestionRequest(request: QuestionRequest): ReadonlyArray<UserInputQuestion> {
   return request.questions.map((question, index) => ({
     id: openCodeQuestionId(index, question),
@@ -558,6 +586,15 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   yield* runOpenCodeSdk("session.abort", () =>
     context.client.session.abort({ sessionID: context.openCodeSessionId }),
   ).pipe(Effect.ignore({ log: true }));
+
+  // Abort any in-flight sub-agent CHILD sessions too — OpenCode's abort does not
+  // cascade to children, so without this a sub-agent keeps running (and burning
+  // tokens) after the parent is stopped. Their threads are settled below.
+  for (const child of context.childSessions.values()) {
+    yield* runOpenCodeSdk("session.abort", () =>
+      context.client.session.abort({ sessionID: child.openCodeSessionId }),
+    ).pipe(Effect.ignore({ log: true }));
+  }
 
   // Closing the session scope interrupts every fiber forked into it and
   // runs each finalizer we registered — the `AbortController.abort()` call,
@@ -1627,7 +1664,7 @@ export function makeOpenCodeAdapter(
     const respondToRequest: OpenCodeAdapterShape["respondToRequest"] = Effect.fn(
       "respondToRequest",
     )(function* (threadId, requestId, decision) {
-      const context = ensureSessionContext(sessions, threadId);
+      const context = ensureRespondableContext(sessions, threadId);
       if (!context.pendingPermissions.has(requestId)) {
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
@@ -1647,7 +1684,7 @@ export function makeOpenCodeAdapter(
     const respondToUserInput: OpenCodeAdapterShape["respondToUserInput"] = Effect.fn(
       "respondToUserInput",
     )(function* (threadId, requestId, answers) {
-      const context = ensureSessionContext(sessions, threadId);
+      const context = ensureRespondableContext(sessions, threadId);
       const request = context.pendingQuestions.get(requestId);
       if (!request) {
         return yield* new ProviderAdapterRequestError({
@@ -1674,6 +1711,10 @@ export function makeOpenCodeAdapter(
             threadId,
           });
         }
+        // Capture child shadow contexts before teardown clears their fibers, so we can
+        // settle each child thread's UI (otherwise a mid-flight sub-agent shows "working"
+        // forever — its own session.status idle will never be processed post-stop).
+        const childContexts = [...context.childSessions.values()];
         const stopped = yield* stopOpenCodeContext(context);
         sessions.delete(threadId);
         if (!stopped) {
@@ -1688,6 +1729,20 @@ export function makeOpenCodeAdapter(
             exitKind: "graceful",
           },
         });
+        for (const child of childContexts) {
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: child.session.threadId,
+              ...(child.activeTurnId ? { turnId: child.activeTurnId } : {}),
+            })),
+            type: "session.exited",
+            payload: {
+              reason: "Parent session stopped.",
+              recoverable: false,
+              exitKind: "graceful",
+            },
+          });
+        }
       },
     );
 
