@@ -7,6 +7,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  type SubagentInfo,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -78,6 +79,12 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /**
+   * Present on `collab_agent_tool_call` entries that spawned a sub-agent. Drives the
+   * named sub-agent pill (agent name + live indicator) and, in Phase 2, click-through
+   * navigation into the child session (`childProviderSessionId`).
+   */
+  subagent?: SubagentInfo;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -260,6 +267,17 @@ export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolea
     return false;
   }
   return true;
+}
+
+/**
+ * True when an entry is a named sub-agent spawn (the `task` tool) that should render
+ * as a dedicated pill — agent name + live indicator. Unlike ordinary tool rows, these
+ * stay visible while in-progress (they must not be dropped by the neutral-status
+ * filters) so the user can see a sub-agent is running. Requires a resolved agent name
+ * so generic agent-ish tools without sub-agent metadata fall back to the normal row.
+ */
+export function workEntryIsSubagentPill(entry: WorkLogEntry): boolean {
+  return entry.itemType === "collab_agent_tool_call" && entry.subagent?.agentName !== undefined;
 }
 
 export function formatDuration(durationMs: number): string {
@@ -749,6 +767,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (toolCallId) {
     entry.toolCallId = toolCallId;
   }
+  const subagent = extractSubagentInfo(payload);
+  if (subagent) {
+    entry.subagent = subagent;
+  }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
     toolLifecycleStatus = "completed";
@@ -818,6 +840,10 @@ function mergeDerivedWorkLogEntries(
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  // Field-merge sub-agent metadata (later events win per field) so a child session id
+  // learned on an earlier event survives a later one that omits it.
+  const subagent =
+    previous.subagent || next.subagent ? { ...previous.subagent, ...next.subagent } : undefined;
   return {
     ...previous,
     ...next,
@@ -832,6 +858,7 @@ function mergeDerivedWorkLogEntries(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(subagent ? { subagent } : {}),
   };
 }
 
@@ -849,6 +876,12 @@ function mergeChangedFiles(
 function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
   if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
     return undefined;
+  }
+  // Keep distinct sub-agent spawns on distinct rows: concurrent sub-agents share the
+  // `task` tool (and may share a description), so key by the child session id when
+  // present so two running sub-agents don't collapse into one pill.
+  if (entry.subagent?.childProviderSessionId) {
+    return `subagent:${entry.subagent.childProviderSessionId}`;
   }
   if (entry.toolCallId) {
     return `tool:${entry.toolCallId}`;
@@ -1084,6 +1117,31 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
   return asTrimmedString(data?.toolCallId);
+}
+
+function extractSubagentInfo(payload: Record<string, unknown> | null): SubagentInfo | undefined {
+  const subagent = asRecord(payload?.subagent);
+  if (!subagent) {
+    return undefined;
+  }
+  const agentName = asTrimmedString(subagent.agentName) ?? undefined;
+  const description = asTrimmedString(subagent.description) ?? undefined;
+  const childProviderSessionId = asTrimmedString(subagent.childProviderSessionId) ?? undefined;
+  const background = subagent.background === true ? true : undefined;
+  if (
+    agentName === undefined &&
+    description === undefined &&
+    childProviderSessionId === undefined &&
+    background === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(agentName !== undefined ? { agentName } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(childProviderSessionId !== undefined ? { childProviderSessionId } : {}),
+    ...(background !== undefined ? { background } : {}),
+  };
 }
 
 function normalizeInlinePreview(value: string): string {

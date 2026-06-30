@@ -401,12 +401,29 @@ const TurnDiffUpdatedPayload = Schema.Struct({
 });
 export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
+/**
+ * Display + navigation metadata for a sub-agent (the `task` tool). Rides on
+ * `collab_agent_tool_call` item events so the client can render a named pill with
+ * a live indicator instead of opaque tool-output text. All fields are optional so
+ * historical events (and providers that omit them) still decode on replay.
+ * `childProviderSessionId` is the spawned child session id (OpenCode only — Claude
+ * sub-agents have no navigable child session); it powers Phase 2 navigation.
+ */
+export const SubagentInfo = Schema.Struct({
+  agentName: Schema.optional(TrimmedNonEmptyStringSchema),
+  description: Schema.optional(TrimmedNonEmptyStringSchema),
+  childProviderSessionId: Schema.optional(TrimmedNonEmptyStringSchema),
+  background: Schema.optional(Schema.Boolean),
+});
+export type SubagentInfo = typeof SubagentInfo.Type;
+
 export const ItemLifecyclePayload = Schema.Struct({
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   data: Schema.optional(Schema.Unknown),
+  subagent: Schema.optional(SubagentInfo),
 });
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;
 

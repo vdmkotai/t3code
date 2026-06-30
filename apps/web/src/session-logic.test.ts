@@ -21,6 +21,7 @@ import {
   workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
+  workEntryIsSubagentPill,
 } from "./session-logic";
 
 let nextActivityId = 0;
@@ -1684,5 +1685,148 @@ describe("deriveActiveWorkStartedAt", () => {
         "2026-02-27T21:11:00.000Z",
       ),
     ).toBe("2026-02-27T21:11:00.000Z");
+  });
+});
+
+describe("subagent pill derivation", () => {
+  function subagentActivity(overrides: {
+    kind: "tool.started" | "tool.updated" | "tool.completed";
+    status?: string;
+    childSession?: string;
+    agentName?: string;
+    description?: string;
+    background?: boolean;
+    id?: string;
+    sequence?: number;
+  }): OrchestrationThreadActivity {
+    return makeActivity({
+      id: overrides.id,
+      kind: overrides.kind,
+      summary: "Subagent task",
+      sequence: overrides.sequence,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        ...(overrides.status ? { status: overrides.status } : {}),
+        title: "Subagent task",
+        subagent: {
+          ...(overrides.agentName !== undefined ? { agentName: overrides.agentName } : {}),
+          ...(overrides.description !== undefined ? { description: overrides.description } : {}),
+          ...(overrides.childSession !== undefined
+            ? { childProviderSessionId: overrides.childSession }
+            : {}),
+          ...(overrides.background !== undefined ? { background: overrides.background } : {}),
+        },
+      },
+    });
+  }
+
+  it("extracts subagent metadata onto the work entry and flags it as a pill", () => {
+    const entries = deriveWorkLogEntries([
+      subagentActivity({
+        kind: "tool.updated",
+        status: "inProgress",
+        agentName: "givi",
+        description: "JS poem one",
+        childSession: "ses_child_1",
+        background: true,
+        sequence: 1,
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.subagent).toEqual({
+      agentName: "givi",
+      description: "JS poem one",
+      childProviderSessionId: "ses_child_1",
+      background: true,
+    });
+    expect(workEntryIsSubagentPill(entry)).toBe(true);
+  });
+
+  it("treats a collab_agent_tool_call without an agent name as a normal row, not a pill", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        kind: "tool.completed",
+        summary: "Agent tool",
+        payload: { itemType: "collab_agent_tool_call", title: "Agent tool" },
+        sequence: 1,
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(workEntryIsSubagentPill(entries[0]!)).toBe(false);
+  });
+
+  it("keeps two concurrent sub-agents on separate rows (distinct child sessions do not collapse)", () => {
+    const entries = deriveWorkLogEntries([
+      subagentActivity({
+        kind: "tool.updated",
+        status: "inProgress",
+        agentName: "givi",
+        description: "JS poem",
+        childSession: "ses_child_1",
+        sequence: 1,
+      }),
+      subagentActivity({
+        kind: "tool.updated",
+        status: "inProgress",
+        agentName: "givi",
+        description: "JS poem",
+        childSession: "ses_child_2",
+        sequence: 2,
+      }),
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e) => e.subagent?.childProviderSessionId)).toEqual([
+      "ses_child_1",
+      "ses_child_2",
+    ]);
+  });
+
+  it("collapses the lifecycle of one sub-agent into a single entry, preserving the child session id", () => {
+    const entries = deriveWorkLogEntries([
+      // tool.started is dropped client-side; the child session id arrives on running/completed.
+      subagentActivity({
+        kind: "tool.started",
+        agentName: "givi",
+        description: "JS poem one",
+        sequence: 1,
+      }),
+      subagentActivity({
+        kind: "tool.updated",
+        status: "inProgress",
+        agentName: "givi",
+        description: "JS poem one",
+        childSession: "ses_child_1",
+        sequence: 2,
+      }),
+      subagentActivity({
+        kind: "tool.completed",
+        status: "completed",
+        agentName: "givi",
+        description: "JS poem one",
+        childSession: "ses_child_1",
+        sequence: 3,
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.subagent?.childProviderSessionId).toBe("ses_child_1");
+    expect(entries[0]!.toolLifecycleStatus).toBe("completed");
+  });
+
+  it("an in-progress sub-agent pill is neutral-status yet must remain a pill (so filters can exempt it)", () => {
+    const [entry] = deriveWorkLogEntries([
+      subagentActivity({
+        kind: "tool.updated",
+        status: "inProgress",
+        agentName: "oracle",
+        description: "Review",
+        childSession: "ses_child_x",
+        sequence: 1,
+      }),
+    ]);
+    // It reads as neutral (neither success nor failure) — the exact case the timeline
+    // filters drop for ordinary tools — so the pill predicate is what keeps it visible.
+    expect(workEntryIndicatesToolNeutralStatus(entry!)).toBe(true);
+    expect(workEntryIsSubagentPill(entry!)).toBe(true);
   });
 });

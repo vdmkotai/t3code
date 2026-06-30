@@ -733,6 +733,101 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect(
+    "surfaces sub-agent metadata (name, child session, background) on the task tool item",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-subagent");
+        const sessionID = "http://127.0.0.1:9999/session";
+        const taskPart = (state: Record<string, unknown>): Record<string, unknown> => ({
+          id: "part-task",
+          sessionID,
+          messageID: "msg-task",
+          type: "tool",
+          tool: "task",
+          callID: "call-task",
+          state,
+        });
+        runtimeMock.state.subscribedEvents = [
+          {
+            type: "message.updated",
+            properties: { sessionID, info: { id: "msg-task", role: "assistant" } },
+          },
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              time: 1,
+              part: taskPart({
+                status: "running",
+                title: "JS poem one (@givi subagent)",
+                input: {
+                  subagent_type: "givi",
+                  description: "JS poem one",
+                  prompt: "Write a poem",
+                },
+                metadata: {
+                  sessionId: "ses_child_1",
+                  parentSessionId: sessionID,
+                  background: true,
+                },
+                time: { start: 1 },
+              }),
+            },
+          },
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              time: 2,
+              part: taskPart({
+                status: "completed",
+                title: "JS poem one (@givi subagent)",
+                output: "A finished poem",
+                input: { subagent_type: "givi", description: "JS poem one" },
+                metadata: { sessionId: "ses_child_1", parentSessionId: sessionID },
+                time: { start: 1, end: 2 },
+              }),
+            },
+          },
+        ];
+
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.filter(
+            (event) => event.type === "item.updated" || event.type === "item.completed",
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        const updated = events.find((event) => event.type === "item.updated");
+        NodeAssert.ok(updated, "expected an item.updated for the running task tool");
+        if (updated?.type === "item.updated") {
+          NodeAssert.equal(updated.payload.itemType, "collab_agent_tool_call");
+          NodeAssert.deepEqual(updated.payload.subagent, {
+            agentName: "givi",
+            description: "JS poem one",
+            childProviderSessionId: "ses_child_1",
+            background: true,
+          });
+        }
+        const completed = events.find((event) => event.type === "item.completed");
+        if (completed?.type === "item.completed") {
+          NodeAssert.equal(completed.payload.subagent?.childProviderSessionId, "ses_child_1");
+        }
+      }),
+  );
+
   it.effect("writes provider-native observability records using the session thread id", () =>
     Effect.gen(function* () {
       const nativeEvents: Array<{

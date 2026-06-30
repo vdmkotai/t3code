@@ -7,6 +7,7 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  type SubagentInfo,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -350,6 +351,47 @@ function detailFromToolPart(part: Extract<Part, { type: "tool" }>): string | und
     default:
       return undefined;
   }
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Extracts sub-agent display + navigation metadata from a `task` tool part. The
+ * spawning model passes `subagent_type`/`description` as tool input, and OpenCode's
+ * task tool stamps the spawned child session id + background flag into the tool
+ * state metadata (see opencode `packages/opencode/src/tool/task.ts`). Pending tool
+ * states carry input but no metadata, so the child session id only appears once the
+ * part transitions to running/completed — which is fine: `tool.started` rows are
+ * dropped client-side and the pill is derived from running/completed events.
+ */
+function subagentInfoFromToolPart(part: Extract<Part, { type: "tool" }>): SubagentInfo | undefined {
+  const state = part.state as {
+    readonly input?: Record<string, unknown>;
+    readonly metadata?: Record<string, unknown>;
+  };
+  const input = state.input;
+  const metadata = state.metadata;
+  const agentName = nonEmptyString(input?.["subagent_type"]);
+  const description = nonEmptyString(input?.["description"]);
+  const childProviderSessionId = nonEmptyString(metadata?.["sessionId"]);
+  const background =
+    metadata?.["background"] === true || input?.["background"] === true ? true : undefined;
+  if (
+    agentName === undefined &&
+    description === undefined &&
+    childProviderSessionId === undefined &&
+    background === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(agentName !== undefined ? { agentName } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(childProviderSessionId !== undefined ? { childProviderSessionId } : {}),
+    ...(background !== undefined ? { background } : {}),
+  };
 }
 
 function toolStateCreatedAt(part: Extract<Part, { type: "tool" }>): string | undefined {
@@ -743,6 +785,8 @@ export function makeOpenCodeAdapter(
             const title =
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
             const detail = detailFromToolPart(part);
+            const subagent =
+              itemType === "collab_agent_tool_call" ? subagentInfoFromToolPart(part) : undefined;
             const payload = {
               itemType,
               ...(part.state.status === "error"
@@ -752,6 +796,7 @@ export function makeOpenCodeAdapter(
                   : { status: "inProgress" as const }),
               ...(title ? { title } : {}),
               ...(detail ? { detail } : {}),
+              ...(subagent ? { subagent } : {}),
               data: {
                 tool: part.tool,
                 state: part.state,
