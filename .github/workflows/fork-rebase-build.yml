@@ -1,0 +1,143 @@
+name: Fork rebase + build
+
+# Keeps the personal fork current with upstream and ships an installable
+# macOS build every day:
+#   1. Rebase the integration branch (`fork-build` = upstream main + the #3604
+#      OpenCode resume fix + the parallel-install variant patches) onto the
+#      latest pingdotgg/t3code main.
+#   2. On a clean rebase, force-push it and build an unsigned arm64 DMG.
+#   3. Publish that DMG to the rolling `fork-build-latest` prerelease.
+#   4. On a rebase conflict or build failure, open an issue so a human (or an
+#      agent) can step in — the only time manual work is needed.
+
+on:
+  schedule:
+    # 06:00 UTC daily — after upstream's nightly has typically landed.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      skip_rebase:
+        description: "Build the current fork-build as-is (no rebase onto upstream)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-rebase-build
+  cancel-in-progress: false
+
+env:
+  INTEGRATION_BRANCH: fork-build
+  UPSTREAM_REPO: https://github.com/pingdotgg/t3code.git
+
+jobs:
+  rebase-and-build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: fork-build
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Rebase onto upstream/main
+        id: rebase
+        run: |
+          set -euo pipefail
+          git config user.name "fork-bot"
+          git config user.email "fork-bot@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream main
+          if [ "${{ github.event.inputs.skip_rebase }}" = "true" ]; then
+            echo "Skipping rebase by request."
+          else
+            if ! git rebase upstream/main; then
+              git rebase --abort || true
+              echo "REBASE_CONFLICT=1" >> "$GITHUB_ENV"
+              echo "::error::Rebase of $INTEGRATION_BRANCH onto upstream/main hit a conflict."
+              exit 1
+            fi
+            git push --force-with-lease origin "$INTEGRATION_BRANCH"
+          fi
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.1"
+
+      - name: Enable pnpm (corepack)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Sanity-check the fix (typecheck + adapter tests)
+        run: |
+          set -euo pipefail
+          pnpm --filter t3 run typecheck
+          pnpm --filter t3 exec vp test run src/provider/Layers/OpenCodeAdapter.test.ts
+
+      - name: Build desktop inputs
+        run: pnpm run build:desktop
+
+      - name: Package DMG (arm64, unsigned)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          BUILD_VERSION="0.0.0-fork3604.$(date -u +%Y%m%d).${{ github.run_number }}"
+          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
+          pnpm run dist:desktop:artifact \
+            --platform mac --target dmg --arch arm64 \
+            --build-version "$BUILD_VERSION" --verbose
+
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Refresh the single rolling release so the newest DMG is always at a
+          # stable URL.
+          gh release delete fork-build-latest --cleanup-tag --yes || true
+          gh release create fork-build-latest release/*.dmg \
+            --target "$INTEGRATION_BRANCH" \
+            --title "Fork build (#3604) — $BUILD_VERSION" \
+            --prerelease \
+            --notes "Auto-built fork of pingdotgg/t3code carrying the #3604 OpenCode session-resume fix.
+
+          Installs **alongside** your primary T3 Code (separate bundle id \`com.t3tools.t3code.fork3604\`, app name \"T3 Code (Fork 3604)\", isolated data dir \`~/.t3-fork3604\`).
+
+          Unsigned build: on first launch right-click the app → Open, or run \`xattr -dr com.apple.quarantine \"/Applications/T3 Code (Fork 3604).app\"\`."
+
+      - name: Report failure as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "${REBASE_CONFLICT:-0}" = "1" ]; then
+            title="⚠️ Fork rebase conflict onto upstream/main ($(date -u +%Y-%m-%d))"
+            body=$(cat <<EOF
+          The daily rebase of \`$INTEGRATION_BRANCH\` onto \`upstream/main\` hit a conflict and was aborted — the fork was **not** updated or rebuilt today.
+
+          Resolve locally:
+          \`\`\`
+          git fetch upstream
+          git checkout $INTEGRATION_BRANCH
+          git rebase upstream/main      # resolve conflicts (usually in the #3604 fix)
+          git push --force-with-lease origin $INTEGRATION_BRANCH
+          \`\`\`
+          Then re-run the workflow. Logs: $run_url
+          EOF
+          )
+          else
+            title="⚠️ Fork build failed ($(date -u +%Y-%m-%d))"
+            body=$(printf 'The rebase succeeded but the desktop DMG build/test failed. Logs: %s' "$run_url")
+          fi
+          gh issue create --title "$title" --body "$body" || true
