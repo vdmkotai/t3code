@@ -220,18 +220,27 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
           default: {},
         },
         agents: [],
+        // Locations chosen to exercise every inferOpenCodeSkillScope branch:
+        // `.config/opencode` → user, project-local `.opencode` → project,
+        // home-level `.agents` → user (default).
         skills: [
           {
             name: "openclaw-review",
             description: "Review OpenClaw workflow changes.",
-            location: "/Users/test/.agents/skills/openclaw-review/SKILL.md",
+            location: "/Users/test/.config/opencode/skill/openclaw-review/SKILL.md",
             content: "---\nname: openclaw-review\n---\n",
           },
           {
             name: "openclaw-triage",
             description: "Triage OpenClaw routing issues.",
-            location: "/Users/test/.agents/skills/openclaw-triage/SKILL.md",
+            location: "/Users/test/projects/demo/.opencode/skill/openclaw-triage/SKILL.md",
             content: "---\nname: openclaw-triage\n---\n",
+          },
+          {
+            name: "openclaw-zeta",
+            description: "Personal home-level skill.",
+            location: "/Users/test/.agents/skills/openclaw-zeta/SKILL.md",
+            content: "---\nname: openclaw-zeta\n---\n",
           },
           {
             name: "missing-location",
@@ -249,20 +258,30 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
           name: skill.name,
           path: skill.path,
           enabled: skill.enabled,
+          scope: skill.scope,
           shortDescription: skill.shortDescription,
         })),
         [
           {
             name: "openclaw-review",
-            path: "/Users/test/.agents/skills/openclaw-review/SKILL.md",
+            path: "/Users/test/.config/opencode/skill/openclaw-review/SKILL.md",
             enabled: true,
+            scope: "user",
             shortDescription: "Review OpenClaw workflow changes.",
           },
           {
             name: "openclaw-triage",
-            path: "/Users/test/.agents/skills/openclaw-triage/SKILL.md",
+            path: "/Users/test/projects/demo/.opencode/skill/openclaw-triage/SKILL.md",
             enabled: true,
+            scope: "project",
             shortDescription: "Triage OpenClaw routing issues.",
+          },
+          {
+            name: "openclaw-zeta",
+            path: "/Users/test/.agents/skills/openclaw-zeta/SKILL.md",
+            enabled: true,
+            scope: "user",
+            shortDescription: "Personal home-level skill.",
           },
         ],
       );
