@@ -43,7 +43,10 @@ import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityRes
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
-import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import {
+  ProviderRuntimeIngestionLive,
+  runtimeEventToActivities,
+} from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -3059,5 +3062,62 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+});
+
+describe("runtimeEventToActivities — sub-agent forwarding", () => {
+  const subagentItemEvent = (
+    type: "item.started" | "item.updated" | "item.completed",
+  ): ProviderRuntimeEvent =>
+    ({
+      type,
+      eventId: asEventId(`evt-${type}`),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-subagent"),
+      itemId: "call_1",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        ...(type === "item.completed" ? {} : { status: "inProgress" }),
+        title: "Subagent task",
+        subagent: {
+          agentName: "givi",
+          description: "JS poem one",
+          childProviderSessionId: "ses_child_1",
+          background: true,
+        },
+        data: { tool: "task" },
+      },
+    }) as unknown as ProviderRuntimeEvent;
+
+  for (const type of ["item.started", "item.updated", "item.completed"] as const) {
+    it(`forwards subagent metadata + stable callId onto the persisted activity for ${type}`, () => {
+      const activities = runtimeEventToActivities(subagentItemEvent(type));
+      expect(activities).toHaveLength(1);
+      const payload = activities[0]!.payload as Record<string, unknown>;
+      expect(payload.subagent).toEqual({
+        agentName: "givi",
+        description: "JS poem one",
+        childProviderSessionId: "ses_child_1",
+        background: true,
+      });
+      expect(payload.toolCallId).toBe("call_1");
+    });
+  }
+
+  it("does not attach a callId to ordinary (non-subagent) tool items", () => {
+    const activities = runtimeEventToActivities({
+      type: "item.updated",
+      eventId: asEventId("evt-plain-tool"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-subagent"),
+      itemId: "call_2",
+      payload: { itemType: "command_execution", status: "inProgress", title: "Command run" },
+    } as unknown as ProviderRuntimeEvent);
+    expect(activities).toHaveLength(1);
+    const payload = activities[0]!.payload as Record<string, unknown>;
+    expect(payload.toolCallId).toBeUndefined();
+    expect(payload.subagent).toBeUndefined();
   });
 });

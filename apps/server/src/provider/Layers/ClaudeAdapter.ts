@@ -42,6 +42,7 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  type SubagentInfo,
   ThreadId,
   TurnId,
   type UserInputQuestion,
@@ -856,6 +857,38 @@ function summarizeToolRequest(toolName: string, input: Record<string, unknown>):
     return `${toolName}: ${serialized}`;
   }
   return `${toolName}: ${serialized.slice(0, 397)}...`;
+}
+
+/**
+ * Sub-agent display metadata for the `Task` tool (name + description). Claude
+ * sub-agents are surfaced as `collab_agent_tool_call` items but, unlike OpenCode,
+ * carry no navigable child session — so `childProviderSessionId` is intentionally
+ * absent and the client renders a named pill without a click-through affordance.
+ * Derived from the (possibly streaming) tool input, so it fills in as soon as
+ * `subagent_type`/`description` are parsed.
+ */
+function subagentInfoFromToolInput(
+  itemType: CanonicalItemType,
+  input: Record<string, unknown>,
+): SubagentInfo | undefined {
+  if (itemType !== "collab_agent_tool_call") {
+    return undefined;
+  }
+  const agentName =
+    typeof input.subagent_type === "string" && input.subagent_type.trim().length > 0
+      ? input.subagent_type.trim()
+      : undefined;
+  const description =
+    typeof input.description === "string" && input.description.trim().length > 0
+      ? input.description.trim()
+      : undefined;
+  if (agentName === undefined && description === undefined) {
+    return undefined;
+  }
+  return {
+    ...(agentName !== undefined ? { agentName } : {}),
+    ...(description !== undefined ? { description } : {}),
+  };
 }
 
 function titleForTool(itemType: CanonicalItemType): string {
@@ -2185,6 +2218,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         };
         context.inFlightTools.set(event.index, nextTool);
 
+        const updatedSubagent = subagentInfoFromToolInput(nextTool.itemType, nextTool.input);
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
           type: "item.updated",
@@ -2203,6 +2237,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: "inProgress",
             title: nextTool.title,
             ...(nextTool.detail ? { detail: nextTool.detail } : {}),
+            ...(updatedSubagent ? { subagent: updatedSubagent } : {}),
             data: {
               toolName: nextTool.toolName,
               input: nextTool.input,
@@ -2284,6 +2319,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       context.inFlightTools.set(index, tool);
 
+      const startedSubagent = subagentInfoFromToolInput(tool.itemType, toolInput);
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
         type: "item.started",
@@ -2298,6 +2334,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(startedSubagent ? { subagent: startedSubagent } : {}),
           data: {
             toolName: tool.toolName,
             input: toolInput,
@@ -2414,6 +2451,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       }
 
+      const completedSubagent = subagentInfoFromToolInput(tool.itemType, tool.input);
       const completedStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
         type: "item.completed",
@@ -2428,6 +2466,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: itemStatus,
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(completedSubagent ? { subagent: completedSubagent } : {}),
           data: toolData,
         },
         providerRefs: nativeProviderRefs(context, {

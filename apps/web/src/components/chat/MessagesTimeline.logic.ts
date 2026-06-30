@@ -2,6 +2,7 @@ import * as Equal from "effect/Equal";
 import {
   formatDuration,
   workEntryIndicatesToolNeutralStatus,
+  workEntryIsSubagentPill,
   workLogEntryIsToolLike,
   type TimelineEntry,
   type WorkLogEntry,
@@ -436,11 +437,16 @@ export function deriveMessagesTimelineRows(input: {
         groupedEntries.push(nextEntry.entry);
         cursor += 1;
       }
+      // Sub-agent pills stay visible while running (they would otherwise be dropped as
+      // neutral/in-progress) so the user can see a sub-agent was spawned and is working.
       const visibleGroupedEntries = groupedEntries.filter(
-        (entry) => !workEntryIndicatesToolNeutralStatus(entry),
+        (entry) => workEntryIsSubagentPill(entry) || !workEntryIndicatesToolNeutralStatus(entry),
       );
+      // When a group contains a sub-agent pill, render every entry (no overflow toggle) so
+      // concurrent sub-agents are all visible at once, matching OpenCode's behavior.
+      const groupHasSubagentPill = visibleGroupedEntries.some(workEntryIsSubagentPill);
       if (visibleGroupedEntries.length > 0) {
-        if (visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
+        if (groupHasSubagentPill || visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
           nextRows.push({
             kind: "work",
             id: timelineEntry.id,

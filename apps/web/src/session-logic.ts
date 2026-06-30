@@ -7,6 +7,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  type SubagentInfo,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -78,6 +79,12 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /**
+   * Present on `collab_agent_tool_call` entries that spawned a sub-agent. Drives the
+   * named sub-agent pill (agent name + live indicator) and, in Phase 2, click-through
+   * navigation into the child session (`childProviderSessionId`).
+   */
+  subagent?: SubagentInfo;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -260,6 +267,50 @@ export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolea
     return false;
   }
   return true;
+}
+
+/**
+ * True when an entry is a named sub-agent spawn (the `task` tool) that should render
+ * as a dedicated pill — agent name + live indicator. Unlike ordinary tool rows, these
+ * stay visible while in-progress (they must not be dropped by the neutral-status
+ * filters) so the user can see a sub-agent is running. Requires a resolved agent name
+ * so generic agent-ish tools without sub-agent metadata fall back to the normal row.
+ */
+export function workEntryIsSubagentPill(entry: WorkLogEntry): boolean {
+  return entry.itemType === "collab_agent_tool_call" && entry.subagent?.agentName !== undefined;
+}
+
+export type SubagentPillState = "running" | "completed" | "failed" | "stopped" | "dispatched";
+
+/**
+ * Resolve the visual state of a sub-agent pill. Phase 1 has no live child-session tracking, so:
+ * - failed/declined -> failed (X);
+ * - stopped -> stopped (—);
+ * - completed: a foreground sub-agent -> completed (check); a background one -> dispatched — the
+ *   parent `task` tool returns immediately while the child keeps running, so a check would read
+ *   as finished; show a neutral "running in background" until Phase 2 navigation lands;
+ * - in-progress: spinner while the turn runs; once the turn settles with no terminal event
+ *   (interrupt / lost event) resolve to stopped rather than spinning forever.
+ */
+export function resolveSubagentPillState(
+  entry: WorkLogEntry,
+  turnSettled: boolean,
+): SubagentPillState {
+  const status = entry.toolLifecycleStatus;
+  if (workEntryIndicatesToolFailure(entry) || status === "failed" || status === "declined") {
+    return "failed";
+  }
+  if (status === "stopped") {
+    return "stopped";
+  }
+  const isBackground = entry.subagent?.background === true;
+  if (status === "completed") {
+    return isBackground ? "dispatched" : "completed";
+  }
+  if (status === "inProgress") {
+    return turnSettled ? "stopped" : "running";
+  }
+  return turnSettled ? "completed" : "running";
 }
 
 export function formatDuration(durationMs: number): string {
@@ -637,7 +688,7 @@ export function deriveWorkLogEntries(
     if (isPlanBoundaryToolActivity(activity)) continue;
     entries.push(toDerivedWorkLogEntry(activity));
   }
-  return collapseDerivedWorkLogEntries(entries).map((entry) => {
+  return dedupeSubagentPills(collapseDerivedWorkLogEntries(entries)).map((entry) => {
     const { activityKind, collapseKey: _collapseKey, ...rest } = entry;
     return Object.assign(rest, { sourceActivityKind: activityKind });
   });
@@ -749,6 +800,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (toolCallId) {
     entry.toolCallId = toolCallId;
   }
+  const subagent = extractSubagentInfo(payload);
+  if (subagent) {
+    entry.subagent = subagent;
+  }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
     toolLifecycleStatus = "completed";
@@ -776,6 +831,53 @@ function collapseDerivedWorkLogEntries(
     collapsed.push(entry);
   }
   return collapsed;
+}
+
+/**
+ * Stable identity for a sub-agent pill across its whole lifecycle, used to keep exactly one
+ * row per spawned sub-agent. Prefers the tool call id (present on every lifecycle event from
+ * the first, unlike the late-arriving child session id), falling back to the child session id;
+ * returns undefined when neither is known so distinct spawns are never wrongly merged.
+ */
+function subagentPillKey(entry: DerivedWorkLogEntry): string | undefined {
+  if (!workEntryIsSubagentPill(entry)) {
+    return undefined;
+  }
+  if (entry.toolCallId) {
+    return `callid:${entry.toolCallId}`;
+  }
+  if (entry.subagent?.childProviderSessionId) {
+    return `child:${entry.subagent.childProviderSessionId}`;
+  }
+  return undefined;
+}
+
+/**
+ * Concurrent sub-agents interleave their running/completed events, so the adjacency-based tool
+ * collapse cannot merge a single sub-agent's events. Reduce sub-agent pills by stable identity:
+ * one row per sub-agent, anchored at its first appearance, carrying its latest state.
+ */
+function dedupeSubagentPills(entries: ReadonlyArray<DerivedWorkLogEntry>): DerivedWorkLogEntry[] {
+  const indexByKey = new Map<string, number>();
+  const result: DerivedWorkLogEntry[] = [];
+  for (const entry of entries) {
+    const key = subagentPillKey(entry);
+    if (key === undefined) {
+      result.push(entry);
+      continue;
+    }
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, result.length);
+      result.push(entry);
+      continue;
+    }
+    const existing = result[existingIndex]!;
+    const merged = mergeDerivedWorkLogEntries(existing, entry);
+    // Anchor to the first appearance so the pill updates in place rather than jumping.
+    result[existingIndex] = { ...merged, id: existing.id, createdAt: existing.createdAt };
+  }
+  return result;
 }
 
 function shouldCollapseToolLifecycleEntries(
@@ -818,6 +920,10 @@ function mergeDerivedWorkLogEntries(
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  // Field-merge sub-agent metadata (later events win per field) so a child session id
+  // learned on an earlier event survives a later one that omits it.
+  const subagent =
+    previous.subagent || next.subagent ? { ...previous.subagent, ...next.subagent } : undefined;
   return {
     ...previous,
     ...next,
@@ -832,6 +938,7 @@ function mergeDerivedWorkLogEntries(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(subagent ? { subagent } : {}),
   };
 }
 
@@ -1083,7 +1190,32 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
-  return asTrimmedString(data?.toolCallId);
+  return asTrimmedString(payload?.toolCallId) ?? asTrimmedString(data?.toolCallId);
+}
+
+function extractSubagentInfo(payload: Record<string, unknown> | null): SubagentInfo | undefined {
+  const subagent = asRecord(payload?.subagent);
+  if (!subagent) {
+    return undefined;
+  }
+  const agentName = asTrimmedString(subagent.agentName) ?? undefined;
+  const description = asTrimmedString(subagent.description) ?? undefined;
+  const childProviderSessionId = asTrimmedString(subagent.childProviderSessionId) ?? undefined;
+  const background = subagent.background === true ? true : undefined;
+  if (
+    agentName === undefined &&
+    description === undefined &&
+    childProviderSessionId === undefined &&
+    background === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(agentName !== undefined ? { agentName } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(childProviderSessionId !== undefined ? { childProviderSessionId } : {}),
+    ...(background !== undefined ? { background } : {}),
+  };
 }
 
 function normalizeInlinePreview(value: string): string {

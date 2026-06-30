@@ -26,9 +26,11 @@ import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { FileDiff } from "@pierre/diffs/react";
 import {
   deriveTimelineEntries,
+  resolveSubagentPillState,
   workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
+  workEntryIsSubagentPill,
   workLogEntryIsToolLike,
 } from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
@@ -60,6 +62,7 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { Spinner } from "../ui/spinner";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
@@ -1114,7 +1117,10 @@ const WorkGroupSection = memo(function WorkGroupSection({
 }) {
   const { workspaceRoot } = use(TimelineRowCtx);
   const nonEmptyEntries = useMemo(
-    () => groupedEntries.filter((entry) => !workEntryIndicatesToolNeutralStatus(entry)),
+    () =>
+      groupedEntries.filter(
+        (entry) => workEntryIsSubagentPill(entry) || !workEntryIndicatesToolNeutralStatus(entry),
+      ),
     [groupedEntries],
   );
   const onlyToolEntries = nonEmptyEntries.every((entry) => workLogEntryIsToolLike(entry));
@@ -1888,6 +1894,16 @@ function capitalizePhrase(value: string): string {
   return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
 }
 
+/** Turns a raw subagent type (e.g. `code-reviewer`, `givi`) into a display name (`Code Reviewer`, `Givi`). */
+function formatSubagentName(raw: string): string {
+  const words = raw
+    .trim()
+    .split(/[-_\s]+/)
+    .filter((word) => word.length > 0)
+    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`);
+  return words.length > 0 ? words.join(" ") : raw.trim();
+}
+
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
@@ -1904,6 +1920,161 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
+
+  if (workEntryIsSubagentPill(workEntry)) {
+    const subagent = workEntry.subagent;
+    const agentLabel = subagent?.agentName ? formatSubagentName(subagent.agentName) : "Subagent";
+    const description = subagent?.description?.trim();
+    const subtitle =
+      description && description.length > 0
+        ? subagent?.background
+          ? `${description} (background)`
+          : description
+        : subagent?.background
+          ? "(background)"
+          : null;
+    const turnSettled = !activity.activeTurnInProgress;
+    const pillState = resolveSubagentPillState(workEntry, turnSettled);
+    const failed = pillState === "failed";
+    const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
+    const canExpand = expandedBody !== null;
+    const ariaLabel = subtitle ? `${agentLabel} — ${subtitle}` : agentLabel;
+    const pillToggleProps = canExpand
+      ? {
+          role: "button" as const,
+          tabIndex: 0 as const,
+          "aria-label": ariaLabel,
+          onClick: () => setExpanded((v) => !v),
+          onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setExpanded((v) => !v);
+            }
+          },
+        }
+      : {};
+    return (
+      <div
+        className={cn(
+          "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
+          canExpand &&
+            "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+        )}
+        {...pillToggleProps}
+      >
+        <div className="flex select-none items-center gap-1.5">
+          <span
+            className={cn(
+              "flex size-5 shrink-0 items-center justify-center",
+              failed ? "text-destructive" : "text-primary/70",
+            )}
+          >
+            <BotIcon className="block size-3.5 shrink-0 stroke-[1.8]" aria-hidden />
+          </span>
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <p className="flex min-w-0 w-full items-baseline gap-1.5 text-[12px] leading-5">
+                <span className="shrink-0 font-medium text-foreground/82">{agentLabel}</span>
+                <span className="shrink-0 rounded bg-muted/60 px-1 text-[10px] uppercase tracking-wide text-muted-foreground/65">
+                  subagent
+                </span>
+                {subtitle && (
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground/60">
+                    {subtitle}
+                  </span>
+                )}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-px text-muted-foreground/55">
+              <span
+                className="flex size-4 shrink-0 items-center justify-center"
+                aria-hidden={!canExpand}
+              >
+                {canExpand ? (
+                  <ChevronDownIcon
+                    className={cn(
+                      "size-3 shrink-0 opacity-70 transition-transform duration-200",
+                      expanded && "rotate-180",
+                    )}
+                    aria-hidden
+                  />
+                ) : null}
+              </span>
+              <span className="flex size-4 shrink-0 items-center justify-center">
+                {pillState === "running" ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="flex size-4 items-center justify-center" />}
+                    >
+                      <Spinner className="block size-3 shrink-0 text-muted-foreground/70" />
+                    </TooltipTrigger>
+                    <TooltipPopup>Working…</TooltipPopup>
+                  </Tooltip>
+                ) : pillState === "failed" ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <span
+                          className="flex size-4 items-center justify-center"
+                          aria-label="Subagent failed"
+                        />
+                      }
+                    >
+                      <XIcon className="block size-3 shrink-0 text-destructive" aria-hidden />
+                    </TooltipTrigger>
+                    <TooltipPopup>Failed</TooltipPopup>
+                  </Tooltip>
+                ) : pillState === "stopped" ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="flex size-4 items-center justify-center" />}
+                    >
+                      <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
+                    </TooltipTrigger>
+                    <TooltipPopup>Stopped</TooltipPopup>
+                  </Tooltip>
+                ) : pillState === "dispatched" ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="flex size-4 items-center justify-center" />}
+                    >
+                      <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
+                    </TooltipTrigger>
+                    <TooltipPopup>Running in background</TooltipPopup>
+                  </Tooltip>
+                ) : (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="flex size-4 items-center justify-center" />}
+                    >
+                      <CheckIcon
+                        className="block size-3 shrink-0 stroke-current"
+                        stroke="currentColor"
+                        aria-hidden
+                      />
+                    </TooltipTrigger>
+                    <TooltipPopup>Completed</TooltipPopup>
+                  </Tooltip>
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+        {expanded && canExpand && expandedBody ? (
+          <div
+            className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
+            onClick={stopRowToggle}
+            onPointerDown={stopRowToggle}
+          >
+            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+              {expandedBody}
+            </pre>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);

@@ -1171,3 +1171,58 @@ describe("computeStableMessagesTimelineRows", () => {
     expect(reordered.result).toEqual([initial.result[1], initial.result[0]]);
   });
 });
+
+describe("deriveMessagesTimelineRows subagent pills", () => {
+  function pillEntry(id: string, createdAt: string, childSession: string, description: string) {
+    return {
+      id,
+      kind: "work" as const,
+      createdAt,
+      entry: {
+        id: `${id}-entry`,
+        createdAt,
+        turnId: null,
+        label: "Subagent task",
+        tone: "tool" as const,
+        itemType: "collab_agent_tool_call" as const,
+        toolLifecycleStatus: "inProgress" as const,
+        subagent: { agentName: "givi", description, childProviderSessionId: childSession },
+      },
+    };
+  }
+
+  it("keeps concurrent in-progress sub-agent pills visible while dropping a neutral plain tool", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        pillEntry("pill-a", "2026-01-01T00:00:01Z", "ses_child_1", "JS poem one"),
+        pillEntry("pill-b", "2026-01-01T00:00:02Z", "ses_child_2", "JS poem two"),
+        {
+          id: "tool-c",
+          kind: "work" as const,
+          createdAt: "2026-01-01T00:00:03Z",
+          entry: {
+            id: "tool-c-entry",
+            createdAt: "2026-01-01T00:00:03Z",
+            turnId: null,
+            label: "Ran command",
+            tone: "tool" as const,
+            itemType: "command_execution" as const,
+            toolLifecycleStatus: "inProgress" as const,
+          },
+        },
+      ],
+      isWorking: true,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    const grouped = rows
+      .filter((row): row is Extract<(typeof rows)[number], { kind: "work" }> => row.kind === "work")
+      .flatMap((row) => row.groupedEntries);
+    // Both pills survive the neutral-status filters; the in-progress plain command is dropped.
+    expect(grouped.map((entry) => entry.id)).toEqual(["pill-a-entry", "pill-b-entry"]);
+    // A pill-bearing group is never hidden behind an overflow toggle.
+    expect(rows.some((row) => row.kind === "work-toggle")).toBe(false);
+  });
+});

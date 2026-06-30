@@ -262,7 +262,12 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
-function runtimeEventToActivities(
+/**
+ * Pure mapping from a provider runtime event to the persisted thread activities it produces.
+ * Exported for focused unit testing of the per-event-type projection (notably sub-agent
+ * forwarding on the item.* hops).
+ */
+export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
@@ -569,6 +574,12 @@ function runtimeEventToActivities(
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            // Stable per-call id (present on every lifecycle event, unlike the
+            // late-arriving child session id) so a sub-agent's running/completed
+            // rows collapse into one pill. Scoped to sub-agents to avoid changing
+            // collapse behavior for ordinary tools.
+            ...(event.payload.subagent && event.itemId ? { toolCallId: event.itemId } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -591,6 +602,8 @@ function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(event.payload.subagent && event.itemId ? { toolCallId: event.itemId } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -613,6 +626,8 @@ function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(event.payload.subagent && event.itemId ? { toolCallId: event.itemId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
