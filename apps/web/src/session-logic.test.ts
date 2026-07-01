@@ -1588,12 +1588,28 @@ describe("isLatestTurnSettled", () => {
     completedAt: "2026-02-27T21:10:06.000Z",
   } as const;
 
-  it("returns false while the same turn is still active in a running session", () => {
+  it("treats a running session still pointing at the already-completed latest turn as settled (orphaned interrupt)", () => {
+    // The session is stuck at `running` with its active turn being the latest turn, which
+    // has already completed — e.g. the app quit mid-interrupt before the settling session
+    // event fired. This must read as settled so the "Working" spinner can't wedge forever.
     expect(
       isLatestTurnSettled(latestTurn, {
         status: "running",
         activeTurnId: TurnId.make("turn-1"),
       }),
+    ).toBe(true);
+  });
+
+  it("returns false while an in-progress latest turn is still active in a running session", () => {
+    expect(
+      isLatestTurnSettled(
+        {
+          turnId: TurnId.make("turn-1"),
+          startedAt: "2026-02-27T21:10:00.000Z",
+          completedAt: null,
+        },
+        { status: "running", activeTurnId: TurnId.make("turn-1") },
+      ),
     ).toBe(false);
   });
 
@@ -1636,10 +1652,29 @@ describe("deriveActiveWorkStartedAt", () => {
     completedAt: "2026-02-27T21:10:06.000Z",
   } as const;
 
-  it("prefers the in-flight turn start when the latest turn is not settled", () => {
+  it("does not resurrect the completed latest turn as active work (orphaned running)", () => {
+    // Session stuck at running still points at the already-completed latest turn; that is
+    // not live work, so fall back to the send start rather than the completed turn's start.
     expect(
       deriveActiveWorkStartedAt(
         latestTurn,
+        {
+          status: "running",
+          activeTurnId: TurnId.make("turn-1"),
+        },
+        "2026-02-27T21:11:00.000Z",
+      ),
+    ).toBe("2026-02-27T21:11:00.000Z");
+  });
+
+  it("prefers the in-flight turn start while an in-progress turn is running", () => {
+    expect(
+      deriveActiveWorkStartedAt(
+        {
+          turnId: TurnId.make("turn-1"),
+          startedAt: "2026-02-27T21:10:00.000Z",
+          completedAt: null,
+        },
         {
           status: "running",
           activeTurnId: TurnId.make("turn-1"),

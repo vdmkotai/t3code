@@ -349,7 +349,14 @@ export function isLatestTurnSettled(
   if (!latestTurn?.startedAt) return false;
   if (!latestTurn.completedAt) return false;
   if (!session) return true;
-  if (session.status === "running") return false;
+  if (session.status === "running") {
+    // Orphaned `running`: the session still claims the already-completed latest turn as
+    // its active turn — e.g. the app quit mid-interrupt before the settling session event
+    // fired, leaving the projection stuck at running. Treat that specific state as settled
+    // so the spinner can't wedge forever. A genuinely active turn is already excluded above
+    // (its latest turn has no completedAt); a different active turn still reads as running.
+    return session.activeTurnId === latestTurn.turnId;
+  }
   return true;
 }
 
@@ -361,6 +368,11 @@ export function deriveActiveWorkStartedAt(
   const runningTurnId = session?.status === "running" ? session.activeTurnId : null;
   if (runningTurnId !== null) {
     if (latestTurn?.turnId === runningTurnId) {
+      // Orphaned `running` (see isLatestTurnSettled): the claimed-active turn already
+      // completed, so it isn't live work — don't start the "working" clock on it.
+      if (latestTurn.completedAt) {
+        return sendStartedAt;
+      }
       return latestTurn.startedAt ?? sendStartedAt;
     }
     return sendStartedAt;
