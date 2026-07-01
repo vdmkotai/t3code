@@ -200,6 +200,7 @@ import {
   useThreadJumpHintVisibility,
   ThreadStatusPill,
 } from "./Sidebar.logic";
+import { isLatestTurnSettled } from "../session-logic";
 import { sortThreads } from "../lib/threadSort";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -458,7 +459,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     [discoveredPorts, navigateToThread, openPreview, threadRef],
   );
   const isThreadRunning =
-    thread.session?.status === "running" && thread.session.activeTurnId != null;
+    thread.session?.status === "running" &&
+    thread.session.activeTurnId != null &&
+    // Exclude an orphaned `running` (activeTurnId is the already-completed latest turn) so a
+    // quit-mid-turn thread doesn't keep showing running-only row affordances.
+    !isLatestTurnSettled(thread.latestTurn, thread.session);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,

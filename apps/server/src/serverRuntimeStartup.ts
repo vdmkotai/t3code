@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -282,6 +283,71 @@ const maybeOpenBrowser = (target: string) =>
     );
   });
 
+/**
+ * Boot reconciliation: `projection_thread_sessions` (the only thing the client "Working"
+ * surfaces read) is settled solely by a runtime-driven `thread.session.set` from
+ * ProviderRuntimeIngestion. When the app is quit/reinstalled mid-turn that settling event never
+ * fires (shutdown only marks provider_session_runtime stopped), and boot is a pure event replay
+ * — so the client projection stays `running` forever and the thread shows "Working" with a dead
+ * stop button. At startup there are no live provider sessions yet, so every such row is stale
+ * from the previous process: settle it back to idle. The projector cascades this to flip any
+ * still-"running" turn to completed too. Fully non-fatal to boot (per-thread + top-level catch).
+ */
+export const reconcileOrphanedSessions = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
+  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const now = DateTime.formatIso(yield* DateTime.now);
+  const snapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+  yield* Effect.forEach(
+    snapshot.threads,
+    (thread) => {
+      const session = thread.session;
+      if (
+        session === null ||
+        (session.status !== "running" &&
+          session.status !== "starting" &&
+          session.activeTurnId === null)
+      ) {
+        return Effect.void;
+      }
+      return Effect.gen(function* () {
+        const uuid = yield* crypto.randomUUIDv4;
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`boot-reconcile:${thread.id}:${uuid}`),
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "ready",
+            providerName: session.providerName,
+            ...(session.providerInstanceId !== undefined
+              ? { providerInstanceId: session.providerInstanceId }
+              : {}),
+            runtimeMode: session.runtimeMode,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("boot session reconcile failed for thread", {
+            threadId: thread.id,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+    },
+    { concurrency: 1 },
+  );
+}).pipe(
+  Effect.catchCause((cause) =>
+    Effect.logWarning("boot session reconciliation failed", { cause: Cause.pretty(cause) }),
+  ),
+);
+
 const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.annotateSpans({ "startup.phase": phase }),
@@ -345,6 +411,9 @@ export const make = Effect.gen(function* () {
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
       }),
     );
+
+    yield* Effect.logDebug("startup phase: reconciling orphaned sessions");
+    yield* runStartupPhase("sessions.reconcile", reconcileOrphanedSessions);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;

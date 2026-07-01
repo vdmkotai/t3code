@@ -380,7 +380,12 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.session?.status === "running") {
+  if (
+    thread.session?.status === "running" &&
+    // Not an orphaned `running` whose activeTurnId is the already-completed latest turn —
+    // that reads as settled so a quit-mid-turn thread doesn't show "Working" forever.
+    !isLatestTurnSettled(thread.latestTurn, thread.session)
+  ) {
     return {
       label: "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",

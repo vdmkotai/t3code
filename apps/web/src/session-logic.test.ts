@@ -12,6 +12,7 @@ import {
   deriveActivePlanState,
   derivePendingApprovals,
   derivePendingUserInputs,
+  derivePhase,
   deriveTimelineEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
@@ -1642,6 +1643,49 @@ describe("isLatestTurnSettled", () => {
         null,
       ),
     ).toBe(false);
+  });
+});
+
+describe("derivePhase", () => {
+  // derivePhase only reads session.status + activeTurnId (and forwards to isLatestTurnSettled),
+  // so a minimal cast keeps the fixtures readable.
+  const sessionWith = (
+    status: "running" | "starting" | "ready" | "stopped",
+    activeTurnId: ReturnType<typeof TurnId.make> | null,
+  ) => ({ status, activeTurnId }) as unknown as Parameters<typeof derivePhase>[0];
+  const activeTurn = {
+    turnId: TurnId.make("turn-1"),
+    startedAt: "2026-02-27T21:10:00.000Z",
+    completedAt: null,
+  };
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    startedAt: "2026-02-27T21:10:00.000Z",
+    completedAt: "2026-02-27T21:10:06.000Z",
+  };
+
+  it("returns 'running' for a genuinely active turn (latest turn not yet completed)", () => {
+    expect(derivePhase(sessionWith("running", TurnId.make("turn-1")), activeTurn)).toBe("running");
+  });
+
+  it("returns 'ready' for an orphaned running session (activeTurnId is the completed latest turn)", () => {
+    // The quit-mid-turn case: session stuck at 'running' but its active turn already finished.
+    expect(derivePhase(sessionWith("running", TurnId.make("turn-1")), completedTurn)).toBe("ready");
+  });
+
+  it("stays 'running' when a different turn is active than the completed latest turn", () => {
+    expect(derivePhase(sessionWith("running", TurnId.make("turn-2")), completedTurn)).toBe(
+      "running",
+    );
+  });
+
+  it("defaults to 'running' with no latestTurn (unchanged legacy behavior for other callers)", () => {
+    expect(derivePhase(sessionWith("running", TurnId.make("turn-1")))).toBe("running");
+  });
+
+  it("maps starting->connecting and stopped->disconnected", () => {
+    expect(derivePhase(sessionWith("starting", null))).toBe("connecting");
+    expect(derivePhase(sessionWith("stopped", null))).toBe("disconnected");
   });
 });
 

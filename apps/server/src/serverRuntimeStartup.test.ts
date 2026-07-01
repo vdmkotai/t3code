@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { DEFAULT_MODEL, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_MODEL, ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -267,4 +267,102 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
     assert.strictEqual(error, uuidError);
     assert.deepStrictEqual(yield* Ref.get(dispatchCalls), []);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "reconcileOrphanedSessions settles orphaned running/starting sessions and skips settled ones",
+  () => {
+    const orphanThreadId = ThreadId.make("thread-orphan");
+    const startingThreadId = ThreadId.make("thread-starting");
+    const settledThreadId = ThreadId.make("thread-settled");
+    const nullSessionThreadId = ThreadId.make("thread-null-session");
+
+    const sessionShell = (
+      id: ThreadId,
+      status: string,
+      activeTurnId: ReturnType<typeof TurnId.make> | null,
+    ) => ({
+      id,
+      session: {
+        threadId: id,
+        status,
+        providerName: "opencode",
+        runtimeMode: "full-access",
+        activeTurnId,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+
+    // Runtime shell fixtures — the reconciler only reads id + session.{status,activeTurnId,
+    // providerName,providerInstanceId,runtimeMode}, so a loose object cast at the getShellSnapshot
+    // boundary keeps the fixture readable.
+    const snapshot = {
+      projects: [],
+      threads: [
+        sessionShell(orphanThreadId, "running", TurnId.make("turn-orphan")),
+        sessionShell(startingThreadId, "starting", null),
+        sessionShell(settledThreadId, "ready", null),
+        { id: nullSessionThreadId, session: null },
+      ],
+    };
+
+    return Effect.gen(function* () {
+      const dispatched = yield* Ref.make<
+        ReadonlyArray<{
+          type: string;
+          threadId: string;
+          status: string | null;
+          activeTurnId: string | null;
+        }>
+      >([]);
+
+      yield* ServerRuntimeStartup.reconcileOrphanedSessions.pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          getCommandReadModel: () => Effect.die("unused"),
+          getSnapshot: () => Effect.die("unused"),
+          getShellSnapshot: () => Effect.succeed(snapshot as never),
+          getArchivedShellSnapshot: () => Effect.die("unused"),
+          getSnapshotSequence: () => Effect.die("unused"),
+          getCounts: () => Effect.die("unused"),
+          getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
+          getProjectShellById: () => Effect.die("unused"),
+          getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+          getThreadCheckpointContext: () => Effect.die("unused"),
+          getFullThreadDiffContext: () => Effect.die("unused"),
+          getThreadShellById: () => Effect.die("unused"),
+          getThreadDetailById: () => Effect.die("unused"),
+        }),
+        Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+          readEvents: () => Stream.empty,
+          dispatch: (command) =>
+            Ref.update(dispatched, (calls) => [
+              ...calls,
+              {
+                type: command.type,
+                threadId: command.type === "thread.session.set" ? command.threadId : "",
+                status: command.type === "thread.session.set" ? command.session.status : null,
+                activeTurnId:
+                  command.type === "thread.session.set" ? command.session.activeTurnId : null,
+              },
+            ]).pipe(Effect.as({ sequence: 1 })),
+          streamDomainEvents: Stream.empty,
+        } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
+        Effect.provide(NodeServices.layer),
+      );
+
+      const calls = yield* Ref.get(dispatched);
+      // Only the running + starting sessions are settled; ready and null-session threads skipped.
+      assert.equal(calls.length, 2);
+      for (const call of calls) {
+        assert.equal(call.type, "thread.session.set");
+        assert.equal(call.status, "ready");
+        assert.equal(call.activeTurnId, null);
+      }
+      assert.deepStrictEqual(
+        calls.map((call) => call.threadId).sort(),
+        [orphanThreadId, startingThreadId].sort(),
+      );
+    });
+  },
 );

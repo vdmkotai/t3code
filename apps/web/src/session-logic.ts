@@ -1526,7 +1526,10 @@ export function inferCheckpointTurnCountByTurnId(
   return result;
 }
 
-export function derivePhase(session: ThreadSession | null): SessionPhase {
+export function derivePhase(
+  session: ThreadSession | null,
+  latestTurn: LatestTurnTiming | null = null,
+): SessionPhase {
   if (
     !session ||
     session.status === "stopped" ||
@@ -1536,6 +1539,12 @@ export function derivePhase(session: ThreadSession | null): SessionPhase {
     return "disconnected";
   }
   if (session.status === "starting") return "connecting";
-  if (session.status === "running") return "running";
+  if (session.status === "running") {
+    // An orphaned `running` session — its activeTurnId still points at the already-completed
+    // latest turn (e.g. the app was quit mid-turn before the settling event fired) — reads as
+    // settled, so the "Working" spinner + stop button don't wedge. A genuinely active turn has
+    // no completedAt, so isLatestTurnSettled returns false and this stays "running".
+    return isLatestTurnSettled(latestTurn, session) ? "ready" : "running";
+  }
   return "ready";
 }

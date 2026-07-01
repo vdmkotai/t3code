@@ -615,6 +615,18 @@ describe("resolveThreadStatusPill", () => {
     ).toMatchObject({ label: "Working", pulse: true });
   });
 
+  it("does not show Working for an orphaned running session whose active turn already completed", () => {
+    // session stays running with activeTurnId "turn-1", but makeLatestTurn() is that same
+    // turn already completed → the quit-mid-turn orphan must NOT read as "Working".
+    const pill = resolveThreadStatusPill({
+      thread: {
+        ...baseThread,
+        latestTurn: makeLatestTurn(),
+      },
+    });
+    expect(pill?.label).not.toBe("Working");
+  });
+
   it("shows plan ready when a settled plan turn has a proposed plan ready for follow-up", () => {
     expect(
       resolveThreadStatusPill({
