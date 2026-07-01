@@ -1335,8 +1335,11 @@ export function resolveMockUpdateServerUrl(mockUpdateServerPort: number | undefi
 
 export function resolveDesktopProductName(_version: string): string {
   // FORK BUILD: fixed, clearly-distinct product name so the app installs next to
-  // "T3 Code (Nightly)" as its own bundle rather than overwriting it.
-  return "T3 Code (Fork 3604)";
+  // "T3 Code (Nightly)" as its own bundle rather than overwriting it. This is the
+  // CFBundleName macOS shows in the menu bar and the dock icon tooltip. It is fully
+  // decoupled from the data location (appId com.t3tools.t3code.fork3604 + baseDir
+  // ~/.t3-fork3604 + userData t3code-fork3604), so renaming it never touches sessions.
+  return "T3 Fork";
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1399,9 +1402,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       protocols: [
         {
-          name: "T3 Code (Fork 3604)",
+          name: "T3 Fork",
           // FORK BUILD: distinct scheme so deep links don't get routed to the
-          // primary install by Launch Services.
+          // primary install by Launch Services. Scheme stays t3code-fork3604 to
+          // preserve deep-link continuity; only the display name changed.
           schemes: ["t3code-fork3604"],
         },
       ],
