@@ -100,7 +100,11 @@ function parseOpenCodeResume(raw: unknown): { readonly sessionId: string } | und
  * deliberately do NOT match free text (`message`/`detail`): those can carry a
  * serialized non-404 body or an unrelated "not found" phrase (e.g. a 500 whose
  * message says "upstream X not found"), which would misclassify a real failure
- * as a missing session and silently drop context. Exported for unit testing.
+ * as a missing session and silently drop context. A node carrying an explicit
+ * non-404 numeric status seals its entire subtree: a 500 whose serialized body
+ * happens to be named `NotFoundError` (or that is itself named
+ * `UpstreamNotFoundError`) is a real failure, and neither its `name` nor
+ * anything it wraps may reclassify it as a miss. Exported for unit testing.
  */
 export function isOpenCodeNotFound(cause: unknown): boolean {
   const seen = new Set<unknown>();
@@ -113,16 +117,19 @@ export function isOpenCodeNotFound(cause: unknown): boolean {
     seen.add(node);
     const record = node as Record<string, unknown>;
 
-    if (record.status === 404 || record.statusCode === 404) {
+    const response = record.response;
+    const statuses = [
+      record.status,
+      record.statusCode,
+      response !== null && typeof response === "object"
+        ? (response as { readonly status?: unknown }).status
+        : undefined,
+    ].filter((status): status is number => typeof status === "number");
+    if (statuses.includes(404)) {
       return true;
     }
-    const response = record.response;
-    if (
-      response !== null &&
-      typeof response === "object" &&
-      (response as { readonly status?: unknown }).status === 404
-    ) {
-      return true;
+    if (statuses.length > 0) {
+      continue;
     }
 
     const name = record.name;
@@ -1362,11 +1369,10 @@ export function makeOpenCodeAdapter(
                     )
                   : undefined;
 
-                // Reuse the upstream session only when it still matches the
-                // requested working directory. OpenCode routes a prompt to the
-                // session's OWN stored directory, so resuming a session created
-                // under a different cwd would silently run there — in that case
-                // start fresh in the requested directory instead.
+                // Reuse the upstream session as-is only when it still matches the
+                // requested working directory. When the cwd changed (e.g. the thread
+                // moved from the project root into a git worktree), the session is
+                // forked into the new directory below rather than reused in place.
                 const reusable =
                   adopted && (!adopted.directory || adopted.directory === directory)
                     ? adopted
